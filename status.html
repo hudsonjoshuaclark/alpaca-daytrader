@@ -1,217 +1,315 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Trading Bot Status</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ORB Bot — Live Status</title>
 <style>
-  .viz-root {
+  :root {
     color-scheme: light;
-    --surface-1: #fcfcfb;
     --page: #f9f9f7;
-    --text-primary: #0b0b0b;
-    --text-secondary: #52514e;
-    --text-muted: #898781;
-    --gridline: #e1e0d9;
-    --good: #0ca30c;
-    --critical: #d03b3b;
-    --good-text: #006300;
-    --critical-text: #b53030;
+    --surface: #fcfcfb;
+    --ink: #0b0b0b;
+    --ink-2: #52514e;
+    --muted: #898781;
+    --grid: #e1e0d9;
+    --baseline: #c3c2b7;
     --border: rgba(11,11,11,0.10);
-    --chip-bg: #eef0ee;
+    --up: #006300;
+    --down: #d03b3b;
+    --good: #0ca30c;
+    --warning: #fab219;
+    --critical: #d03b3b;
+    --series-1: #2a78d6;
   }
   @media (prefers-color-scheme: dark) {
-    :root:where(:not([data-theme="light"])) .viz-root {
+    :root {
       color-scheme: dark;
-      --surface-1: #1a1a19;
       --page: #0d0d0d;
-      --text-primary: #ffffff;
-      --text-secondary: #c3c2b7;
-      --text-muted: #898781;
-      --gridline: #2c2c2a;
-      --good: #0ca30c;
-      --critical: #e66767;
-      --good-text: #0ca30c;
-      --critical-text: #e66767;
+      --surface: #1a1a19;
+      --ink: #ffffff;
+      --ink-2: #c3c2b7;
+      --muted: #898781;
+      --grid: #2c2c2a;
+      --baseline: #383835;
       --border: rgba(255,255,255,0.10);
-      --chip-bg: #262624;
+      --up: #0ca30c;
+      --series-1: #3987e5;
     }
   }
-  :root[data-theme="dark"] .viz-root {
-    color-scheme: dark;
-    --surface-1: #1a1a19;
-    --page: #0d0d0d;
-    --text-primary: #ffffff;
-    --text-secondary: #c3c2b7;
-    --text-muted: #898781;
-    --gridline: #2c2c2a;
-    --good: #0ca30c;
-    --critical: #e66767;
-    --good-text: #0ca30c;
-    --critical-text: #e66767;
-    --border: rgba(255,255,255,0.10);
-    --chip-bg: #262624;
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; }
-  .viz-root {
-    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  * { box-sizing: border-box; margin: 0; }
+  body {
     background: var(--page);
-    color: var(--text-primary);
-    padding: 24px;
-    min-height: 100vh;
-  }
-  .wrap { max-width: 1000px; margin: 0 auto; }
-  .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 12px; }
-  h1 { font-size: 20px; margin: 0; }
-  .status-pill { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-secondary); }
-  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--text-muted); }
-  .dot.alive { background: var(--good); box-shadow: 0 0 0 3px color-mix(in srgb, var(--good) 25%, transparent); }
-  .dot.dead { background: var(--critical); box-shadow: 0 0 0 3px color-mix(in srgb, var(--critical) 25%, transparent); }
-  .card {
-    background: var(--surface-1);
-    border: 1px solid var(--border);
-    border-radius: 12px;
+    color: var(--ink);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
     padding: 20px;
-    margin-bottom: 16px;
+    max-width: 1100px;
+    margin: 0 auto;
   }
-  .stat-row { display: flex; gap: 28px; flex-wrap: wrap; }
-  .stat { display: flex; flex-direction: column; gap: 4px; }
-  .stat-label { font-size: 12px; color: var(--text-secondary); }
-  .stat-value { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
-  .text-good { color: var(--good-text); }
-  .text-critical { color: var(--critical-text); }
-  .chips { display: flex; gap: 6px; flex-wrap: wrap; }
-  .chip { background: var(--chip-bg); border-radius: 6px; padding: 4px 10px; font-size: 12px; font-variant-numeric: tabular-nums; }
-  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-secondary); margin: 0 0 12px; font-weight: 600; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--gridline); font-variant-numeric: tabular-nums; }
-  th { color: var(--text-secondary); font-weight: 500; font-size: 11px; text-transform: uppercase; }
-  .muted { color: var(--text-muted); }
-  .event-tag { font-size: 11px; padding: 2px 8px; border-radius: 4px; background: var(--chip-bg); }
-  .event-tag.entry, .event-tag.day_end { color: var(--good-text); }
-  .event-tag.exit { color: var(--text-primary); }
-  .event-tag.error { color: var(--critical-text); }
-  .event-tag.spread_too_wide, .event-tag.low_open_interest, .event-tag.no_quote, .event-tag.signal_blocked { color: var(--text-muted); }
-  .empty { color: var(--text-muted); padding: 12px 0; }
-  .footer { font-size: 12px; color: var(--text-muted); text-align: center; margin-top: 16px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 16px; margin-bottom: 16px; }
+  h1 { font-size: 18px; font-weight: 650; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-2); border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; background: var(--surface); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .updated { margin-left: auto; font-size: 12px; color: var(--muted); }
+
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 16px; }
+  .tile { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+  .tile .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 4px; }
+  .tile .value { font-size: 24px; font-weight: 650; }
+  .tile .sub { font-size: 12px; color: var(--ink-2); margin-top: 2px; }
+  .delta-up { color: var(--up); }
+  .delta-down { color: var(--down); }
+
+  section { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
+  section h2 { font-size: 13px; font-weight: 650; color: var(--ink-2); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 800px) { .cols { grid-template-columns: 1fr; } }
+  .cols section { margin-bottom: 0; }
+  .colwrap { margin-bottom: 14px; }
+
+  .tablewrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); font-weight: 600; padding: 4px 10px 6px 0; border-bottom: 1px solid var(--grid); }
+  td { padding: 6px 10px 6px 0; border-bottom: 1px solid var(--grid); font-size: 13px; }
+  tr:last-child td { border-bottom: none; }
+  .num { text-align: right; }
+  th.num { text-align: right; }
+
+  .feed { list-style: none; font-variant-numeric: tabular-nums; }
+  .feed li { display: flex; gap: 10px; padding: 5px 0; border-bottom: 1px solid var(--grid); font-size: 13px; align-items: baseline; }
+  .feed li:last-child { border-bottom: none; }
+  .feed .t { color: var(--muted); font-size: 12px; flex: none; width: 62px; }
+  .feed .tag { flex: none; width: 130px; font-size: 12px; font-weight: 600; color: var(--ink-2); }
+  .feed .tag.err { color: var(--critical); }
+  .feed .detail { color: var(--ink-2); overflow-wrap: anywhere; }
+  .empty { color: var(--muted); font-size: 13px; padding: 6px 0; }
+
+  pre { font: 12px/1.5 ui-monospace, Consolas, monospace; color: var(--ink-2); overflow-x: auto; padding: 8px 0; white-space: pre-wrap; }
+  details summary { cursor: pointer; font-size: 13px; color: var(--ink-2); }
+  .banner { border-radius: 8px; padding: 10px 12px; margin-bottom: 14px; font-size: 13px; display: none; border: 1px solid var(--critical); color: var(--critical); background: var(--surface); }
+
+  #sparkwrap { display: none; }
+  #spark { width: 100%; height: 90px; display: block; }
+  .chartnote { font-size: 12px; color: var(--muted); margin-top: 4px; }
 </style>
 </head>
 <body>
-<div class="viz-root">
-  <div class="wrap">
-    <div class="header">
-      <h1>Trading Bot Status</h1>
-      <div class="status-pill"><span id="dot" class="dot"></span><span id="statusText">Loading…</span></div>
-    </div>
+<header>
+  <h1>ORB Trading Bot</h1>
+  <span class="pill" id="botPill"><span class="dot" id="botDot"></span><span id="botText">connecting…</span></span>
+  <span class="pill" id="marketPill"><span class="dot" id="marketDot"></span><span id="marketText">…</span></span>
+  <span class="updated" id="updated"></span>
+</header>
 
-    <div class="card">
-      <div class="stat-row">
-        <div class="stat"><span class="stat-label">Equity</span><span class="stat-value" id="equity">—</span></div>
-        <div class="stat"><span class="stat-label">Cash</span><span class="stat-value" id="cash">—</span></div>
-        <div class="stat"><span class="stat-label">Today's P&amp;L</span><span class="stat-value" id="pnl">—</span></div>
-        <div class="stat"><span class="stat-label">Trades today</span><span class="stat-value" id="trades">—</span></div>
-        <div class="stat"><span class="stat-label">Open positions</span><span class="stat-value" id="posCount">—</span></div>
-      </div>
-    </div>
+<div class="banner" id="banner"></div>
 
-    <div class="card">
-      <h2>Today's screened universe</h2>
-      <div class="chips" id="universe"></div>
-    </div>
-
-    <div class="card">
-      <h2>Open positions</h2>
-      <div id="positionsWrap"></div>
-    </div>
-
-    <div class="card">
-      <h2>Recent activity</h2>
-      <div id="eventsWrap"></div>
-    </div>
-
-    <div class="footer" id="footer"></div>
-  </div>
+<div class="tiles">
+  <div class="tile"><div class="label">Equity</div><div class="value" id="equity">—</div><div class="sub" id="cash"></div></div>
+  <div class="tile"><div class="label">Today's P&amp;L</div><div class="value" id="dayPnl">—</div><div class="sub" id="pnlSplit"></div></div>
+  <div class="tile"><div class="label">Open positions</div><div class="value" id="posCount">—</div><div class="sub" id="posCap"></div></div>
+  <div class="tile"><div class="label">Bot heartbeat</div><div class="value" id="hbAge">—</div><div class="sub">refreshes every 20s</div></div>
+  <div class="tile"><div class="label">Trades today</div><div class="value" id="tradeCount">—</div><div class="sub" id="tradedList"></div></div>
 </div>
 
+<section id="sparkwrap">
+  <h2>Equity by day</h2>
+  <svg id="spark" role="img" aria-label="Daily account equity line chart"></svg>
+  <div class="chartnote" id="sparknote"></div>
+</section>
+
+<div class="cols colwrap">
+  <section>
+    <h2>Open positions</h2>
+    <div class="tablewrap"><table id="posTable">
+      <thead><tr><th>Contract</th><th class="num">Qty</th><th class="num">Entry</th><th class="num">Now</th><th class="num">P&amp;L</th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+    <div class="empty" id="posEmpty" style="display:none">No open positions</div>
+  </section>
+
+  <section>
+    <h2>Automation</h2>
+    <div class="tablewrap"><table id="taskTable">
+      <thead><tr><th>Task</th><th>State</th><th>Next run</th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+  </section>
+</div>
+
+<section>
+  <h2>Today's activity</h2>
+  <ul class="feed" id="feed"></ul>
+  <div class="empty" id="feedEmpty" style="display:none">No events yet today</div>
+</section>
+
+<div class="cols colwrap">
+  <section>
+    <h2>Watchdog</h2>
+    <pre id="watchdog">no incidents recorded</pre>
+  </section>
+  <section>
+    <h2>Latest nightly review</h2>
+    <details id="reviewBox"><summary id="reviewName">none yet</summary><pre id="reviewBody"></pre></details>
+  </section>
+</div>
+
+<section>
+  <h2>Strategy</h2>
+  <div id="strategy" class="empty"></div>
+</section>
+
 <script>
-function fmtMoney(n) {
-  const v = parseFloat(n);
-  const sign = v < 0 ? '-' : '';
-  return sign + '$' + Math.abs(v).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const $ = (id) => document.getElementById(id);
+const fmtUsd = (v) => (v < 0 ? '-$' : '$') + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+let lastFetch = 0;
+
+const FRIENDLY = {
+  ENTRY_ORDER: 'order placed', ENTRY: 'entered', ENTRY_UNFILLED: 'order unfilled',
+  ENTRY_CANCEL_STALE: 'order canceled', EXIT: 'exited', FORCE_FLATTEN: 'flattened',
+  DAY_END: 'day closed', START: 'bot started', ERROR: 'error', SIGNAL_BLOCKED: 'signal blocked',
+  NO_STRUCTURE: 'no affordable contract', NEWS_BLOCKED: 'blocked by news',
+  TRADE_GONE: 'position vanished', SPREAD_TOO_WIDE: 'spread too wide', TRADE_PROPOSED: 'trade proposed',
+  SCREENING: 'screening', SCREEN_COMPLETE: 'screen done', NEWS_FETCH_ERROR: 'news fetch error',
+};
+
+function eventDetail(ev) {
+  const parts = [];
+  if (ev.symbol) parts.push(ev.symbol);
+  if (ev.underlying && ev.underlying !== ev.symbol) parts.push('(' + ev.underlying + ')');
+  if (ev.direction) parts.push(ev.direction);
+  if (ev.kind) parts.push(ev.kind);
+  if (ev.qty) parts.push('x' + ev.qty);
+  if (ev.limitPrice) parts.push('@' + ev.limitPrice);
+  else if (ev.premium) parts.push('@' + ev.premium);
+  if (typeof ev.pnl === 'number') parts.push((ev.pnl >= 0 ? '+' : '') + fmtUsd(ev.pnl));
+  if (ev.reason) parts.push('· ' + (Array.isArray(ev.reason) ? ev.reason.join(', ') : ev.reason));
+  if (ev.reasons) parts.push('· ' + ev.reasons.join(', '));
+  if (ev.message) parts.push(ev.message);
+  if (ev.event === 'DAY_END' && ev.realizedPnL !== undefined) parts.push('realized ' + fmtUsd(ev.realizedPnL));
+  return parts.join(' ');
 }
-function fmtTime(iso) {
-  return new Date(iso).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+function renderSpark(hist) {
+  // fewer than 4 points is a stat, not a chart
+  if (!hist || hist.length < 4) { $('sparkwrap').style.display = 'none'; return; }
+  $('sparkwrap').style.display = 'block';
+  const svg = $('spark');
+  const W = svg.clientWidth || 800, H = 90, padX = 4, padY = 8;
+  const eq = hist.map((h) => parseFloat(h.equity)).filter((v) => !isNaN(v));
+  if (eq.length < 4) { $('sparkwrap').style.display = 'none'; return; }
+  const min = Math.min(...eq), max = Math.max(...eq), span = (max - min) || 1;
+  const x = (i) => padX + (i / (eq.length - 1)) * (W - 2 * padX);
+  const y = (v) => H - padY - ((v - min) / span) * (H - 2 * padY);
+  const d = eq.map((v, i) => (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(v).toFixed(1)).join(' ');
+  svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+  svg.innerHTML =
+    '<line x1="' + padX + '" y1="' + (H - padY) + '" x2="' + (W - padX) + '" y2="' + (H - padY) + '" stroke="var(--baseline)" stroke-width="1"/>' +
+    '<path d="' + d + '" fill="none" stroke="var(--series-1)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>' +
+    '<circle cx="' + x(eq.length - 1) + '" cy="' + y(eq[eq.length - 1]) + '" r="3.5" fill="var(--series-1)" stroke="var(--surface)" stroke-width="2"/>';
+  $('sparknote').textContent = hist[0].date + ' → ' + hist[hist.length - 1].date +
+    ' · ' + fmtUsd(eq[0]) + ' → ' + fmtUsd(eq[eq.length - 1]);
+}
+
+function render(s) {
+  const botOk = s.alive;
+  $('botDot').style.background = botOk ? 'var(--good)' : 'var(--critical)';
+  $('botText').textContent = botOk ? 'bot running' : 'BOT STALLED';
+  $('marketDot').style.background = s.marketOpen ? 'var(--good)' : 'var(--muted)';
+  $('marketText').textContent = s.marketOpen ? 'market open' : 'market closed';
+
+  const paused = s.guardrails && s.guardrails.pausedForReview;
+  const banner = $('banner');
+  if (paused) {
+    banner.style.display = 'block';
+    banner.textContent = '⛔ TRADING PAUSED by drawdown guardrail: ' + s.guardrails.pausedReason;
+  } else if (!botOk && s.marketOpen) {
+    banner.style.display = 'block';
+    banner.textContent = '⚠ Bot heartbeat is stale during market hours. The watchdog checks every 15 minutes and should restart it automatically.';
+  } else banner.style.display = 'none';
+
+  if (s.account) {
+    $('equity').textContent = fmtUsd(s.account.equity);
+    $('cash').textContent = 'cash ' + fmtUsd(s.account.cash);
+  }
+  const realized = s.dailyState ? s.dailyState.realizedPnL : 0;
+  const day = realized + s.unrealizedPl;
+  const pnlEl = $('dayPnl');
+  pnlEl.textContent = (day >= 0 ? '▲ ' : '▼ ') + fmtUsd(day);
+  pnlEl.className = 'value ' + (day >= 0 ? 'delta-up' : 'delta-down');
+  $('pnlSplit').textContent = 'realized ' + fmtUsd(realized) + ' · open ' + fmtUsd(s.unrealizedPl);
+  $('posCount').textContent = s.positions.length;
+  $('posCap').textContent = 'max ' + s.strategy.maxConcurrent + ' concurrent';
+  $('hbAge').textContent = s.heartbeatAgeSec === null ? 'none' : s.heartbeatAgeSec + 's ago';
+  $('tradeCount').textContent = s.dailyState ? s.dailyState.trades : 0;
+  $('tradedList').textContent = s.dailyState && s.dailyState.tradedUnderlyings.length
+    ? 'done: ' + s.dailyState.tradedUnderlyings.join(', ') : 'none attempted yet';
+
+  renderSpark(s.performanceHistory);
+
+  const tbody = $('posTable').querySelector('tbody');
+  tbody.innerHTML = '';
+  $('posEmpty').style.display = s.positions.length ? 'none' : 'block';
+  for (const p of s.positions) {
+    const pl = p.unrealizedPl;
+    tbody.insertAdjacentHTML('beforeend',
+      '<tr><td>' + p.symbol + '</td><td class="num">' + p.qty + '</td><td class="num">' + p.avgEntryPrice +
+      '</td><td class="num">' + (p.currentPrice ?? '—') + '</td><td class="num ' + (pl >= 0 ? 'delta-up' : 'delta-down') + '">' +
+      (pl >= 0 ? '▲ ' : '▼ ') + fmtUsd(pl) + ' (' + (p.unrealizedPlpc * 100).toFixed(1) + '%)</td></tr>');
+  }
+
+  const tt = $('taskTable').querySelector('tbody');
+  tt.innerHTML = '';
+  for (const t of (s.tasks || [])) {
+    tt.insertAdjacentHTML('beforeend',
+      '<tr><td>' + t.name.replace('AlpacaDaytrader', '') + '</td><td>' + t.state + '</td><td>' + (t.nextRun || '—') + '</td></tr>');
+  }
+
+  const today = new Date().toLocaleDateString('en-CA');
+  const feed = $('feed');
+  feed.innerHTML = '';
+  const todays = s.recentEvents.filter((e) => e.ts && new Date(e.ts).toLocaleDateString('en-CA') === today);
+  $('feedEmpty').style.display = todays.length ? 'none' : 'block';
+  for (const ev of todays.slice(0, 30)) {
+    const time = new Date(ev.ts).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    const label = FRIENDLY[ev.event] || (ev.event || '?').toLowerCase().replace(/_/g, ' ');
+    feed.insertAdjacentHTML('beforeend',
+      '<li><span class="t">' + time + '</span><span class="tag' + (ev.event === 'ERROR' ? ' err' : '') + '">' + label +
+      '</span><span class="detail">' + eventDetail(ev) + '</span></li>');
+  }
+
+  $('watchdog').textContent = (s.watchdog && s.watchdog.recent && s.watchdog.recent.length)
+    ? s.watchdog.recent.join('\n') : 'no incidents recorded';
+
+  if (s.latestReview) {
+    $('reviewName').textContent = s.latestReview.name;
+    $('reviewBody').textContent = s.latestReview.content;
+  }
+
+  $('strategy').textContent =
+    s.strategy.name + ' · universe: ' + s.strategy.universe.join(', ') +
+    ' · entries ' + s.strategy.entryWindow + ' · flatten ' + s.strategy.flattenAt +
+    ' · ' + (s.strategy.riskPctPerTrade * 100) + '% of equity per trade · daily stop ' + (s.strategy.dailyLossStopPct * 100) + '%';
 }
 
 async function refresh() {
-  let data;
   try {
     const res = await fetch('/api/status');
-    data = await res.json();
+    const s = await res.json();
+    if (s.error) throw new Error(s.error);
+    render(s);
+    lastFetch = Date.now();
   } catch (e) {
-    document.getElementById('statusText').textContent = 'Cannot reach status server';
-    document.getElementById('dot').className = 'dot dead';
-    return;
+    $('botText').textContent = 'dashboard error: ' + e.message;
+    $('botDot').style.background = 'var(--warning)';
   }
-
-  const dot = document.getElementById('dot');
-  const statusText = document.getElementById('statusText');
-  if (data.alive) {
-    dot.className = 'dot alive';
-    statusText.textContent = data.marketOpen ? 'Running — market open' : 'Idle — market closed';
-  } else {
-    dot.className = 'dot dead';
-    statusText.textContent = 'Not responding (no heartbeat in ' + Math.round(data.heartbeatAgeSec) + 's)';
-  }
-
-  if (data.account) {
-    document.getElementById('equity').textContent = fmtMoney(data.account.equity);
-    document.getElementById('cash').textContent = fmtMoney(data.account.cash);
-  }
-
-  const pnlEl = document.getElementById('pnl');
-  if (data.dailyState) {
-    const pnl = data.dailyState.realizedPnL || 0;
-    pnlEl.textContent = fmtMoney(pnl);
-    pnlEl.className = 'stat-value ' + (pnl >= 0 ? 'text-good' : 'text-critical');
-    document.getElementById('trades').textContent = data.dailyState.trades;
-  }
-  document.getElementById('posCount').textContent = data.positions.length;
-
-  const universeEl = document.getElementById('universe');
-  universeEl.innerHTML = data.universe.length
-    ? data.universe.map(s => '<span class="chip">' + s + '</span>').join('')
-    : '<span class="empty">Not screened yet</span>';
-
-  const posWrap = document.getElementById('positionsWrap');
-  if (data.positions.length === 0) {
-    posWrap.innerHTML = '<div class="empty">No open positions — flat</div>';
-  } else {
-    posWrap.innerHTML = '<table><thead><tr><th>Contract</th><th>Qty</th><th>Entry</th><th>Current</th><th>Unrealized P&amp;L</th></tr></thead><tbody>' +
-      data.positions.map(p => {
-        const plClass = parseFloat(p.unrealizedPl) >= 0 ? 'text-good' : 'text-critical';
-        return '<tr><td>' + p.symbol + '</td><td>' + p.qty + '</td><td>' + fmtMoney(p.avgEntryPrice) + '</td><td>' + fmtMoney(p.currentPrice) + '</td><td class="' + plClass + '">' + fmtMoney(p.unrealizedPl) + ' (' + (parseFloat(p.unrealizedPlpc)*100).toFixed(1) + '%)</td></tr>';
-      }).join('') + '</tbody></table>';
-  }
-
-  const eventsWrap = document.getElementById('eventsWrap');
-  if (data.recentEvents.length === 0) {
-    eventsWrap.innerHTML = '<div class="empty">No events yet</div>';
-  } else {
-    eventsWrap.innerHTML = '<table><thead><tr><th>Time</th><th>Event</th><th>Detail</th></tr></thead><tbody>' +
-      data.recentEvents.map(e => {
-        const { ts, event, ...rest } = e;
-        const detail = Object.entries(rest).map(([k,v]) => k + '=' + (typeof v === 'object' ? JSON.stringify(v) : v)).join(', ');
-        const tagClass = event.toLowerCase();
-        return '<tr><td class="muted">' + fmtTime(ts) + '</td><td><span class="event-tag ' + tagClass + '">' + event + '</span></td><td class="muted">' + detail + '</td></tr>';
-      }).join('') + '</tbody></table>';
-  }
-
-  document.getElementById('footer').textContent = 'Last updated ' + fmtTime(data.generatedAt) + ' · refreshes every 5s';
 }
 
+setInterval(() => {
+  if (lastFetch) $('updated').textContent = 'updated ' + Math.round((Date.now() - lastFetch) / 1000) + 's ago';
+}, 1000);
+setInterval(() => { if (!document.hidden) refresh(); }, 15000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 refresh();
-setInterval(refresh, 5000);
 </script>
 </body>
 </html>
