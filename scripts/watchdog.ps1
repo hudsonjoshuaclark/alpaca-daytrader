@@ -22,8 +22,12 @@ $hm = $now.ToString('HH:mm')
 if ($hm -lt '09:15' -or $hm -gt '16:10') { exit 0 }
 
 function Get-Health {
+    # ORB-15's runner ONLY - see restart-runner.ps1. A bare 'runner\.js' match also counts
+    # strategies\swing-signals\runner.js and strategies\credit-spread\runner.js, so with
+    # those bots up this returned 3, failed the (Runners -eq 1) health test, and drove a
+    # tier-1 "restart" that killed all three and brought back only ORB - every 15 minutes.
     $runners = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
-        Where-Object { $_.CommandLine -match 'runner\.js' })
+        Where-Object { $_.CommandLine -match 'runner\.js' -and $_.CommandLine -notmatch 'strategies' })
     $hbAge = 9999
     $hbFile = Join-Path $repo 'logs\heartbeat.json'
     if (Test-Path $hbFile) {
