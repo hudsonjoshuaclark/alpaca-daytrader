@@ -16,6 +16,7 @@ const md = require('./lib/marketData');
 const contracts = require('./lib/contracts');
 const rm = require('./lib/riskManager');
 const orders = require('./lib/orders');
+const ratchet = require('./lib/ratchet');
 const news = require('./lib/news');
 const { scoreHeadline } = require('./lib/newsScoring');
 
@@ -66,6 +67,54 @@ async function getNewsSignals(symbols) {
     }
   }
   return bySymbol;
+}
+
+// A long call and a long put on the SAME underlying largely cancel each other out: the
+// call's positive delta is offset by the put's negative one, leaving a straddle that bleeds
+// theta and premium for no directional exposure. An ORB breakout signal is a directional
+// bet, so holding both sides is never the intent — it silently negates the trade.
+//
+// The scan loop's tradedUnderlyings/openTrades checks already prevent this on the normal
+// path, but both read STATE, and riskManager.loadState() wipes both on date rollover. A
+// position that outlives the 15:45 force-flatten — a flatten that errored, or the machine
+// asleep through it (which has happened here) — is invisible to them the next morning, and
+// nothing would stop the bot buying the opposing side. Manually-entered legs (see the
+// customStopUsd path) are likewise absent from tradedUnderlyings.
+//
+// So this reads the ACCOUNT rather than state, and therefore holds no matter what state
+// says. Spread legs are safe: a debit call spread is long+short CALLS, same type, so only a
+// genuine call-vs-put clash on one underlying trips it.
+const OCC_SYMBOL_RE = /^[A-Z]{1,6}\d{6}[CP]\d{8}$/;
+
+function opposingOptionPositions(underlying, direction, positionsBySymbol) {
+  const wantType = direction === 'bullish' ? 'call' : 'put';
+  const clashes = [];
+  for (const [sym, pos] of positionsBySymbol) {
+    if (!OCC_SYMBOL_RE.test(sym)) continue; // not an option (defensive; this account is options-only)
+    const parsed = contracts.parseOccSymbol(sym);
+    if (parsed.root !== underlying) continue;
+    if (parsed.type === wantType) continue;
+    if (parseInt(pos.qty, 10) === 0) continue;
+    clashes.push({ symbol: sym, type: parsed.type, qty: pos.qty });
+  }
+  return clashes;
+}
+
+// Log the block once per symbol per day rather than every 20s poll until the cutoff.
+// Deliberately does NOT consume the symbol's one ORB attempt: this is a safety interlock,
+// not a strategy decision, so if the stale opposing position gets closed the symbol should
+// become tradeable again the same day.
+let opposingLogDay = null;
+const opposingLogged = new Set();
+function logOpposingOnce(payload) {
+  const today = contracts.todayET();
+  if (opposingLogDay !== today) {
+    opposingLogDay = today;
+    opposingLogged.clear();
+  }
+  if (opposingLogged.has(payload.symbol)) return;
+  opposingLogged.add(payload.symbol);
+  log('OPPOSING_POSITION_BLOCKED', payload);
 }
 
 // Sum of unrealized P&L across a trade's legs, from a symbol->position map.
@@ -124,6 +173,13 @@ async function reconcilePendingOrders(state) {
       trade.status = 'open';
       trade.entryDebit = parseFloat(order.filled_avg_price) || trade.entryDebit;
       rm.saveState(state);
+      // Execution-quality tracking: how far the actual fill landed from the quoted mid
+      // at the moment the order was submitted (positive = paid above mid). MAX_SPREAD_PCT
+      // already gates on quoted spread at decision time; this measures what the fill
+      // itself cost, which quoted spread alone doesn't capture (queue position, moves
+      // between quote and fill, partial marketable-limit walk).
+      const fillVsMid = trade.quoteMidAtOrder != null ? trade.entryDebit - trade.quoteMidAtOrder : null;
+      const fillVsMidPct = fillVsMid != null && trade.quoteMidAtOrder > 0 ? fillVsMid / trade.quoteMidAtOrder : null;
       log('ENTRY', {
         symbol: trade.legs[0].symbol,
         underlying: trade.underlying,
@@ -132,6 +188,9 @@ async function reconcilePendingOrders(state) {
         qty: trade.qty,
         premium: trade.entryDebit,
         orMid: trade.orMid,
+        quoteMidAtOrder: trade.quoteMidAtOrder,
+        fillVsMid,
+        fillVsMidPct,
         dryRun: false,
       });
     } else if (['canceled', 'expired', 'rejected', 'done_for_day'].includes(order.status)) {
@@ -188,6 +247,18 @@ async function manageOpenTrades(state, positionsBySymbol, bars, newsSignals) {
       continue;
     }
 
+    // per-trade custom $ stop/target (optional - only set on manually-entered trades that
+    // don't fit the standard orMid/OPTION_STOP_PCT model, e.g. a naked single leg entered
+    // outside a fresh ORB signal). Absolute dollar thresholds, not percentages.
+    if (typeof trade.customStopUsd === 'number' && pl <= trade.customStopUsd) {
+      await closeTrade(trade, pl, 'custom_stop', state);
+      continue;
+    }
+    if (typeof trade.customTargetUsd === 'number' && pl >= trade.customTargetUsd) {
+      await closeTrade(trade, pl, 'custom_target', state);
+      continue;
+    }
+
     // high-confidence news contradicting the held direction forces an immediate exit
     const newsForSymbol = newsSignals[trade.underlying];
     if (newsForSymbol && newsForSymbol.confidence === 'high' && newsForSymbol.direction !== trade.direction) {
@@ -200,6 +271,34 @@ async function manageOpenTrades(state, positionsBySymbol, bars, newsSignals) {
     if (costBasis > 0 && pl / costBasis <= -cfg.OPTION_STOP_PCT) {
       await closeTrade(trade, pl, 'option_stop', state);
       continue;
+    }
+
+    // Ratcheting profit floor. Purely additive: minStopRung 1 means rung 0 has no stop of
+    // its own, so a trade that never runs is governed by exactly the exits it always was.
+    // Once premium clears a rung, the floor rides up behind it and can close the trade
+    // before the or_mid_stop below gives the gains back.
+    if (cfg.RATCHET_ENABLED && costBasis > 0) {
+      const r = ratchet.evaluate({
+        rung: trade.rung || 0,
+        gain: pl / costBasis,
+        step: cfg.RATCHET_STEP_PCT,
+        stopDistance: cfg.RATCHET_STOP_PCT,
+        maxRungs: cfg.RATCHET_MAX_RUNGS,
+        minStopRung: 1,
+      });
+      if (r.advanced) {
+        trade.rung = r.rung;
+        rm.saveState(state);
+        log('RATCHET', {
+          symbol: trade.legs[0].symbol, underlying: trade.underlying, rung: r.rung,
+          gainPct: +((pl / costBasis) * 100).toFixed(2),
+          stopPct: +(r.stop * 100).toFixed(2), targetPct: +(r.target * 100).toFixed(2), pnl: pl,
+        });
+      }
+      if (r.stopped) {
+        await closeTrade(trade, pl, 'trail_stop', state, { rung: r.rung });
+        continue;
+      }
     }
 
     // primary exit: underlying crossed back through the opening-range midpoint
@@ -217,9 +316,49 @@ async function manageOpenTrades(state, positionsBySymbol, bars, newsSignals) {
   }
 }
 
-async function tryEnter(symbol, bars, portfolioValue, state, newsForSymbol) {
+const RELSTRENGTH_INDEX_SYMBOL = 'SPY';
+const RELSTRENGTH_EXEMPT = new Set(['SPY', 'QQQ']); // these ARE the benchmark
+
+async function tryEnter(symbol, bars, portfolioValue, state, newsForSymbol, indexBars, positionsBySymbol) {
   const signal = md.computeORBSignal(bars);
   if (!signal) return;
+
+  // Hard interlock: never add the opposite option type on an underlying we already hold.
+  // Checked before contract selection so a clash costs no API calls. positionsBySymbol is
+  // refetched at the top of every tick, so it is at most one poll (~20s) stale, and the
+  // scan loop already allows only one entry per symbol per tick — there is no window for
+  // this bot to open both sides between two checks.
+  const opposing = opposingOptionPositions(symbol, signal.direction, positionsBySymbol);
+  if (opposing.length) {
+    logOpposingOnce({
+      symbol,
+      direction: signal.direction,
+      wouldBuy: signal.direction === 'bullish' ? 'call' : 'put',
+      heldOpposing: opposing.map((o) => `${o.symbol} (${o.type} x${o.qty})`),
+      message: 'would negate the existing position — entry blocked',
+    });
+    return;
+  }
+
+  // Relative-strength-vs-SPY filter, validated 2026-07-28 (see lib/marketData.js
+  // computeRelativeStrength for the backtest numbers): a breakout fighting the index's
+  // own move at that moment is lower quality. SPY/QQQ are exempt - they ARE the benchmark.
+  if (!RELSTRENGTH_EXEMPT.has(symbol) && indexBars) {
+    const rs = md.computeRelativeStrength(bars, indexBars, signal);
+    if (rs && !rs.aligned) {
+      log('RELSTRENGTH_BLOCKED', {
+        symbol,
+        direction: signal.direction,
+        symPct: +(rs.symPct * 100).toFixed(2),
+        indexPct: +(rs.indexPct * 100).toFixed(2),
+      });
+      if (!state.tradedUnderlyings.includes(symbol)) {
+        state.tradedUnderlyings.push(symbol);
+        rm.saveState(state);
+      }
+      return;
+    }
+  }
 
   // news contradicting the breakout direction blocks the entry (any confidence tier)
   if (newsForSymbol && newsForSymbol.direction && newsForSymbol.direction !== signal.direction) {
@@ -269,12 +408,14 @@ async function tryEnter(symbol, bars, portfolioValue, state, newsForSymbol) {
   }
 
   let limitPrice;
+  let quoteMid;
   if (structure.kind === 'single') {
+    quoteMid = structure.quote.mid;
     limitPrice = orders.entryLimitFromQuote(structure.quote);
   } else {
-    const netMid = structure.quote.long.mid - structure.quote.short.mid;
+    quoteMid = structure.quote.long.mid - structure.quote.short.mid;
     const netWorst = structure.quote.long.ask - structure.quote.short.bid;
-    limitPrice = orders.roundTick(netMid + 0.25 * (netWorst - netMid));
+    limitPrice = orders.roundTick(quoteMid + 0.25 * (netWorst - quoteMid));
   }
   if (limitPrice <= 0) {
     log('NO_STRUCTURE', { symbol, reason: 'non-positive limit price' });
@@ -298,6 +439,7 @@ async function tryEnter(symbol, bars, portfolioValue, state, newsForSymbol) {
     direction: signal.direction,
     orMid: signal.orMid,
     entryDebit: limitPrice,
+    quoteMidAtOrder: quoteMid,
     orderId,
     status: 'pending',
     enteredAt: new Date().toISOString(),
@@ -354,7 +496,7 @@ async function tick() {
       if (state.tradedUnderlyings.includes(symbol)) continue;
       if (state.openTrades.some((t) => t.underlying === symbol)) continue;
       if (!bars[symbol]) continue;
-      await tryEnter(symbol, bars[symbol], portfolioValue, state, newsSignals[symbol]);
+      await tryEnter(symbol, bars[symbol], portfolioValue, state, newsSignals[symbol], bars[RELSTRENGTH_INDEX_SYMBOL], positionsBySymbol);
     }
   }
 }
