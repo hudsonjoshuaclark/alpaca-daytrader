@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Multi-Strategy Portfolio — Live Status</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e;
+    --muted: #898781; --grid: #e1e0d9; --border: rgba(11,11,11,0.10);
+    --up: #006300; --down: #d03b3b; --good: #0ca30c; --warning: #fab219; --critical: #d03b3b;
+    --series-1: #2a78d6; --series-2: #a3781c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7;
+      --muted: #898781; --grid: #2c2c2a; --border: rgba(255,255,255,0.10);
+      --up: #0ca30c; --series-1: #3987e5; --series-2: #e0ac3a;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--page); color: var(--ink);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: 20px; max-width: 1200px; margin: 0 auto;
+  }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 16px; margin-bottom: 16px; }
+  h1 { font-size: 18px; font-weight: 650; }
+  .navlink { font-size: 12px; color: var(--muted); text-decoration: underline; }
+  .updated { margin-left: auto; font-size: 12px; color: var(--muted); }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; }
+  .card h2 { font-size: 15px; font-weight: 650; margin-bottom: 4px; }
+  .card .note { font-size: 12px; color: var(--muted); margin-bottom: 14px; max-width: 60ch; }
+
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin-bottom: 14px; }
+  .tile { background: var(--page); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+  .tile .label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 2px; }
+  .tile .value { font-size: 18px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .delta-up { color: var(--up); } .delta-down { color: var(--down); }
+
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; margin-bottom: 10px; }
+  th { text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); font-weight: 600; padding: 3px 8px 4px 0; border-bottom: 1px solid var(--grid); }
+  td { padding: 4px 8px 4px 0; border-bottom: 1px solid var(--grid); font-size: 12.5px; }
+  tr:last-child td { border-bottom: none; }
+  .num { text-align: right; } th.num { text-align: right; }
+  .empty { color: var(--muted); font-size: 12.5px; padding: 4px 0; }
+
+  .closeCell { text-align: right; width: 1%; white-space: nowrap; }
+  .closeBtn { font: inherit; font-size: 11px; padding: 2px 9px; border-radius: 6px; border: 1px solid var(--critical); color: var(--critical); background: transparent; cursor: pointer; }
+  .closeBtn:hover { background: var(--critical); color: #fff; }
+  .closeBtn:disabled { opacity: 0.5; cursor: default; }
+  .legNote { font-size: 10px; color: var(--muted); margin-left: 6px; }
+
+  .feed { list-style: none; font-variant-numeric: tabular-nums; max-height: 220px; overflow-y: auto; }
+  .feed li { display: flex; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--grid); font-size: 12px; }
+  .feed li:last-child { border-bottom: none; }
+  .feed .t { color: var(--muted); flex: none; width: 60px; }
+  .feed .tag { flex: none; width: 110px; font-weight: 600; color: var(--ink-2); }
+  .feed .tag.err { color: var(--critical); }
+  .feed .detail { color: var(--ink-2); overflow-wrap: anywhere; }
+
+  .pill { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--ink-2); border: 1px solid var(--border); border-radius: 999px; padding: 2px 9px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+
+  .chartsSection { margin-bottom: 16px; }
+  .chartsSection h2 { font-size: 13px; font-weight: 650; color: var(--ink-2); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px; }
+  .chartGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+  .chartCard { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; }
+  .chartCard .chartHead { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px; }
+  .chartCard .sym { font-weight: 650; font-size: 13px; }
+  .chartCard .last { font-size: 12px; font-variant-numeric: tabular-nums; }
+  .chartCard svg { width: 100%; height: 60px; display: block; }
+  .dq { font-size: 11px; margin-top: 4px; color: var(--muted); }
+  .dq.diverged { color: var(--warning); font-weight: 600; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Multi-Strategy Portfolio</h1>
+  <a class="navlink" href="/orb15">ORB-15 detail view (equity chart, watchdog, scheduled tasks) →</a>
+  <span class="updated" id="updated"></span>
+</header>
+
+<section class="chartsSection" id="chartsSection" style="display:none">
+  <h2>Live price — stocks the bots are currently holding</h2>
+  <div class="chartGrid" id="chartGrid"></div>
+</section>
+
+<div class="cards" id="cards"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fmtUsd = (v) => (v < 0 ? '-$' : '$') + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+let lastFetch = 0;
+
+const FRIENDLY = {
+  ENTRY_ORDER: 'order placed', ENTRY: 'entered', ENTRY_UNFILLED: 'order unfilled',
+  ENTRY_CANCEL_STALE: 'order canceled', EXIT: 'exited', FORCE_FLATTEN: 'flattened',
+  DAY_END: 'day closed', START: 'bot started', ERROR: 'error', SIGNAL_BLOCKED: 'signal blocked',
+  NO_STRUCTURE: 'no viable trade', NEWS_BLOCKED: 'blocked by news',
+  TRADE_GONE: 'position vanished', SPREAD_TOO_WIDE: 'spread too wide', TRADE_PROPOSED: 'trade proposed',
+  MANUAL_CLOSE: 'manually closed', RELSTRENGTH_BLOCKED: 'blocked by relative strength',
+  RATCHET: 'target hit — stop raised',
+  OPPOSING_POSITION_BLOCKED: 'blocked — would negate open position',
+  NO_SIGNAL: 'no signal', ENTER_DONE: 'entry pass done', EXIT_DONE: 'exit pass done',
+  SKIP: 'skipped (already run today)', SIGNAL_ENTRY: 'order placed',
+};
+
+function eventDetail(ev) {
+  const parts = [];
+  if (ev.symbol) parts.push(ev.symbol);
+  if (ev.underlying && ev.underlying !== ev.symbol) parts.push('(' + ev.underlying + ')');
+  if (ev.direction) parts.push(ev.direction);
+  if (ev.qty) parts.push('x' + ev.qty);
+  if (ev.limitPrice) parts.push('@' + ev.limitPrice);
+  if (typeof ev.pnl === 'number') parts.push((ev.pnl >= 0 ? '+' : '') + fmtUsd(ev.pnl));
+  if (typeof ev.todayReturn === 'number') parts.push('today ' + (ev.todayReturn >= 0 ? '+' : '') + ev.todayReturn + '%');
+  if (typeof ev.rung === 'number') parts.push('rung ' + ev.rung);
+  if (typeof ev.stopPct === 'number') parts.push('stop ' + ev.stopPct + '% / target ' + ev.targetPct + '%');
+  if (ev.reasons) parts.push('· ' + ev.reasons.join(', '));
+  if (ev.reason) parts.push('· ' + (Array.isArray(ev.reason) ? ev.reason.join(', ') : ev.reason));
+  if (ev.message) parts.push(ev.message);
+  return parts.join(' ');
+}
+
+// Manual close. Each bot trades its own Alpaca account, so the strategy key travels with
+// the symbol; the server re-resolves the leg group itself and won't act on this page's
+// copy of it. Auto-refresh is held off while a close is in flight so the button (and the
+// row it lives on) doesn't get re-rendered out from under the click.
+let closeInFlight = 0;
+async function closePosition(strategy, symbol, legs, btn) {
+  const what = legs.length > 1
+    ? 'Close all ' + legs.length + ' legs of this position (' + legs.join(', ') + ')'
+    : 'Close ' + symbol;
+  if (!confirm(what + ' at market? This cannot be undone.')) return;
+  closeInFlight += 1;
+  btn.disabled = true;
+  btn.textContent = 'closing…';
+  try {
+    const res = await fetch('/api/close', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol, strategy }),
+    });
+    const result = await res.json();
+    if (!res.ok) throw new Error(result.error || ('HTTP ' + res.status));
+    closeInFlight -= 1;
+    await refresh();
+  } catch (e) {
+    closeInFlight -= 1;
+    alert('Close failed: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = 'Close';
+  }
+}
+
+$('cards').addEventListener('click', (e) => {
+  const btn = e.target.closest('.closeBtn');
+  if (!btn) return;
+  closePosition(btn.dataset.strategy, btn.dataset.symbol, btn.dataset.legs.split(','), btn);
+});
+
+function renderCard(s) {
+  const paused = s.guardrails && s.guardrails.pausedForReview;
+  const missedWindow = s.missedEntryWindow && s.missedEntryWindow.missed;
+  const equity = s.account ? s.account.equity : null;
+
+  let extraTiles = '';
+  if (s.extra) {
+    extraTiles += '<div class="tile"><div class="label">Realized P&amp;L</div><div class="value ' + (s.extra.realizedPnL >= 0 ? 'delta-up' : 'delta-down') + '">' + fmtUsd(s.extra.realizedPnL || 0) + '</div></div>';
+    extraTiles += '<div class="tile"><div class="label">Trades</div><div class="value">' + (s.extra.trades ?? 0) + '</div></div>';
+    extraTiles += '<div class="tile"><div class="label">Last enter/exit</div><div class="value" style="font-size:13px">' + (s.extra.lastEnterDate || '—') + ' / ' + (s.extra.lastExitDate || '—') + '</div></div>';
+  } else if (s.dailyState) {
+    const realized = s.dailyState.realizedPnL || 0;
+    extraTiles += '<div class="tile"><div class="label">Today\'s trades</div><div class="value">' + (s.dailyState.trades ?? 0) + '</div></div>';
+    extraTiles += '<div class="tile"><div class="label">Realized today</div><div class="value ' + (realized >= 0 ? 'delta-up' : 'delta-down') + '">' + fmtUsd(realized) + '</div></div>';
+  }
+
+  const posRows = (s.positions || []).map((p) => {
+    const pl = p.unrealizedPl;
+    const legs = p.closesWith && p.closesWith.length ? p.closesWith : [p.symbol];
+    // A multi-leg structure shows the same button on every leg — it closes the whole
+    // thing either way, so say so rather than implying one leg can go on its own.
+    const legNote = legs.length > 1 ? '<span class="legNote">' + legs.length + '-leg</span>' : '';
+    return '<tr><td>' + p.symbol + legNote + '</td><td class="num">' + p.qty + '</td><td class="num ' + (pl >= 0 ? 'delta-up' : 'delta-down') + '">' + (pl >= 0 ? '▲ ' : '▼ ') + fmtUsd(pl) + '</td>' +
+      '<td class="closeCell"><button class="closeBtn" data-strategy="' + s.key + '" data-symbol="' + p.symbol + '" data-legs="' + legs.join(',') + '">Close</button></td></tr>';
+  }).join('');
+
+  const feedItems = (s.recentEvents || []).slice(0, 20).map((ev) => {
+    const time = ev.ts ? new Date(ev.ts).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '';
+    const label = FRIENDLY[ev.event] || (ev.event || '?').toLowerCase().replace(/_/g, ' ');
+    return '<li><span class="t">' + time + '</span><span class="tag' + (ev.event === 'ERROR' ? ' err' : '') + '">' + label + '</span><span class="detail">' + eventDetail(ev) + '</span></li>';
+  }).join('');
+
+  return (
+    '<div class="card">' +
+    '<h2>' + s.name + (paused ? ' <span class="pill"><span class="dot" style="background:var(--critical)"></span>PAUSED</span>' : '') +
+    (missedWindow ? ' <span class="pill"><span class="dot" style="background:var(--warning)"></span>MISSED ENTRY WINDOW</span>' : '') + '</h2>' +
+    (missedWindow ? '<div class="note" style="color:var(--critical)">⚠ ' + s.missedEntryWindow.reason + '</div>' : '') +
+    (s.extra && s.extra.strategyNote ? '<div class="note">' + s.extra.strategyNote + '</div>' : '') +
+    (s.extra && s.extra.todaysProposal ? '<div class="note"><b>Today:</b> ' + s.extra.todaysProposal + '</div>' : '') +
+    '<div class="tiles">' +
+    '<div class="tile"><div class="label">Equity</div><div class="value">' + (equity != null ? fmtUsd(equity) : '—') + '</div></div>' +
+    '<div class="tile"><div class="label">Unrealized</div><div class="value ' + (s.unrealizedPl >= 0 ? 'delta-up' : 'delta-down') + '">' + fmtUsd(s.unrealizedPl || 0) + '</div></div>' +
+    '<div class="tile"><div class="label">Open positions</div><div class="value">' + (s.positions ? s.positions.length : 0) + '</div></div>' +
+    extraTiles +
+    '</div>' +
+    '<table><thead><tr><th>Position</th><th class="num">Qty</th><th class="num">P&amp;L</th><th></th></tr></thead><tbody>' + posRows + '</tbody></table>' +
+    (posRows ? '' : '<div class="empty">No open positions</div>') +
+    '<ul class="feed">' + feedItems + '</ul>' +
+    (feedItems ? '' : '<div class="empty">No recent activity</div>') +
+    '</div>'
+  );
+}
+
+const SOURCE_LABEL = { yahoo: 'Yahoo', finnhub: 'Finnhub' };
+function renderDataQuality(dq) {
+  if (!dq || !dq.sources) return '';
+  const lines = Object.entries(dq.sources).map(([key, s]) => {
+    const pct = (s.diffPct * 100).toFixed(2);
+    return (s.diverged ? '⚠ ' : '') + SOURCE_LABEL[key] + ' $' + s.price.toFixed(2) + ' (' + pct + '% vs Alpaca)';
+  });
+  return '<div class="dq' + (dq.diverged ? ' diverged' : '') + '">' + lines.join(' · ') + '</div>';
+}
+
+function renderPriceChart(symbol, bars, dq) {
+  const closes = (bars || []).map((b) => b.c).filter((v) => typeof v === 'number' && !isNaN(v));
+  const W = 260, H = 60, padX = 4, padY = 6;
+  let svgInner = '<div class="empty">not enough data yet</div>';
+  let lastPrice = null;
+  if (closes.length >= 2) {
+    lastPrice = closes[closes.length - 1];
+    const min = Math.min(...closes), max = Math.max(...closes), span = (max - min) || 1;
+    const up = closes[closes.length - 1] >= closes[0];
+    const x = (i) => padX + (i / (closes.length - 1)) * (W - 2 * padX);
+    const y = (v) => H - padY - ((v - min) / span) * (H - 2 * padY);
+    const d = closes.map((v, i) => (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(v).toFixed(1)).join(' ');
+    const color = up ? 'var(--up)' : 'var(--down)';
+    svgInner = '<svg viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none">' +
+      '<line x1="' + padX + '" y1="' + (H - padY) + '" x2="' + (W - padX) + '" y2="' + (H - padY) + '" stroke="var(--grid)" stroke-width="1"/>' +
+      '<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>' +
+      '<circle cx="' + x(closes.length - 1) + '" cy="' + y(closes[closes.length - 1]) + '" r="3" fill="' + color + '"/>' +
+      '</svg>';
+  }
+  return '<div class="chartCard"><div class="chartHead"><span class="sym">' + symbol + '</span>' +
+    '<span class="last">' + (lastPrice != null ? '$' + lastPrice.toFixed(2) : '—') + '</span></div>' +
+    svgInner + renderDataQuality(dq) + '</div>';
+}
+
+function renderPriceCharts(priceCharts, dataQualityChecks) {
+  const symbols = Object.keys(priceCharts || {});
+  const section = $('chartsSection');
+  if (symbols.length === 0) { section.style.display = 'none'; return; }
+  section.style.display = 'block';
+  $('chartGrid').innerHTML = symbols.map((sym) => renderPriceChart(sym, priceCharts[sym], (dataQualityChecks || {})[sym])).join('');
+}
+
+async function refresh() {
+  try {
+    const res = await fetch('/api/multi-status');
+    const s = await res.json();
+    if (s.error) throw new Error(s.error);
+    $('cards').innerHTML = s.strategies.map(renderCard).join('');
+    renderPriceCharts(s.priceCharts, s.dataQualityChecks);
+    lastFetch = Date.now();
+  } catch (e) {
+    $('cards').innerHTML = '<div class="card">dashboard error: ' + e.message + '</div>';
+  }
+}
+
+setInterval(() => {
+  if (lastFetch) $('updated').textContent = 'updated ' + Math.round((Date.now() - lastFetch) / 1000) + 's ago';
+}, 1000);
+setInterval(() => { if (!document.hidden && !closeInFlight) refresh(); }, 15000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden && !closeInFlight) refresh(); });
+refresh();
+</script>
+</body>
+</html>

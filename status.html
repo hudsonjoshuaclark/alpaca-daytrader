@@ -51,6 +51,7 @@
   .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-2); border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; background: var(--surface); }
   .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
   .updated { margin-left: auto; font-size: 12px; color: var(--muted); }
+  .navlink { font-size: 12px; color: var(--muted); text-decoration: underline; }
 
   .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 16px; }
   .tile { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
@@ -84,6 +85,10 @@
   .feed .detail { color: var(--ink-2); overflow-wrap: anywhere; }
   .empty { color: var(--muted); font-size: 13px; padding: 6px 0; }
 
+  .closeBtn { font: inherit; font-size: 12px; padding: 3px 10px; border-radius: 6px; border: 1px solid var(--critical); color: var(--critical); background: transparent; cursor: pointer; }
+  .closeBtn:hover { background: var(--critical); color: #fff; }
+  .closeBtn:disabled { opacity: 0.5; cursor: default; }
+
   pre { font: 12px/1.5 ui-monospace, Consolas, monospace; color: var(--ink-2); overflow-x: auto; padding: 8px 0; white-space: pre-wrap; }
   details summary { cursor: pointer; font-size: 13px; color: var(--ink-2); }
   .banner { border-radius: 8px; padding: 10px 12px; margin-bottom: 14px; font-size: 13px; display: none; border: 1px solid var(--critical); color: var(--critical); background: var(--surface); }
@@ -98,6 +103,7 @@
   <h1>ORB Trading Bot</h1>
   <span class="pill" id="botPill"><span class="dot" id="botDot"></span><span id="botText">connecting…</span></span>
   <span class="pill" id="marketPill"><span class="dot" id="marketDot"></span><span id="marketText">…</span></span>
+  <a class="navlink" href="/">← all bots (multi-strategy overview)</a>
   <span class="updated" id="updated"></span>
 </header>
 
@@ -109,6 +115,7 @@
   <div class="tile"><div class="label">Open positions</div><div class="value" id="posCount">—</div><div class="sub" id="posCap"></div></div>
   <div class="tile"><div class="label">Bot heartbeat</div><div class="value" id="hbAge">—</div><div class="sub">refreshes every 20s</div></div>
   <div class="tile"><div class="label">Trades today</div><div class="value" id="tradeCount">—</div><div class="sub" id="tradedList"></div></div>
+  <div class="tile"><div class="label">Fill vs quoted mid</div><div class="value" id="fillQuality">—</div><div class="sub" id="fillQualitySub"></div></div>
 </div>
 
 <section id="sparkwrap">
@@ -121,7 +128,7 @@
   <section>
     <h2>Open positions</h2>
     <div class="tablewrap"><table id="posTable">
-      <thead><tr><th>Contract</th><th class="num">Qty</th><th class="num">Entry</th><th class="num">Now</th><th class="num">P&amp;L</th></tr></thead>
+      <thead><tr><th>Contract</th><th class="num">Qty</th><th class="num">Entry</th><th class="num">Now</th><th class="num">P&amp;L</th><th></th></tr></thead>
       <tbody></tbody>
     </table></div>
     <div class="empty" id="posEmpty" style="display:none">No open positions</div>
@@ -154,6 +161,12 @@
 </div>
 
 <section>
+  <h2>Trader attention advisory</h2>
+  <div class="empty" id="advisoryEmpty">none yet</div>
+  <details id="advisoryBox" style="display:none"><summary id="advisoryName"></summary><pre id="advisoryBody"></pre></details>
+</section>
+
+<section>
   <h2>Strategy</h2>
   <div id="strategy" class="empty"></div>
 </section>
@@ -170,7 +183,30 @@ const FRIENDLY = {
   NO_STRUCTURE: 'no affordable contract', NEWS_BLOCKED: 'blocked by news',
   TRADE_GONE: 'position vanished', SPREAD_TOO_WIDE: 'spread too wide', TRADE_PROPOSED: 'trade proposed',
   SCREENING: 'screening', SCREEN_COMPLETE: 'screen done', NEWS_FETCH_ERROR: 'news fetch error',
+  MANUAL_CLOSE: 'manually closed', RELSTRENGTH_BLOCKED: 'blocked by relative strength',
+  RATCHET: 'target hit — stop raised',
+  OPPOSING_POSITION_BLOCKED: 'blocked — would negate open position',
 };
+
+async function closePosition(symbol, btn) {
+  if (!confirm('Close ' + symbol + ' at market? This cannot be undone.')) return;
+  btn.disabled = true;
+  btn.textContent = 'closing…';
+  try {
+    const res = await fetch('/api/close', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol }),
+    });
+    const result = await res.json();
+    if (!res.ok) throw new Error(result.error || ('HTTP ' + res.status));
+    await refresh();
+  } catch (e) {
+    alert('Close failed: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = 'Close';
+  }
+}
 
 function eventDetail(ev) {
   const parts = [];
@@ -182,6 +218,8 @@ function eventDetail(ev) {
   if (ev.limitPrice) parts.push('@' + ev.limitPrice);
   else if (ev.premium) parts.push('@' + ev.premium);
   if (typeof ev.pnl === 'number') parts.push((ev.pnl >= 0 ? '+' : '') + fmtUsd(ev.pnl));
+  if (typeof ev.rung === 'number') parts.push('rung ' + ev.rung);
+  if (typeof ev.stopPct === 'number') parts.push('stop ' + ev.stopPct + '% / target ' + ev.targetPct + '%');
   if (ev.reason) parts.push('· ' + (Array.isArray(ev.reason) ? ev.reason.join(', ') : ev.reason));
   if (ev.reasons) parts.push('· ' + ev.reasons.join(', '));
   if (ev.message) parts.push(ev.message);
@@ -225,14 +263,27 @@ function render(s) {
   } else if (!botOk && s.marketOpen) {
     banner.style.display = 'block';
     banner.textContent = '⚠ Bot heartbeat is stale during market hours. The watchdog checks every 15 minutes and should restart it automatically.';
+  } else if (s.missedEntryWindow && s.missedEntryWindow.missed) {
+    banner.style.display = 'block';
+    banner.textContent = '⚠ ' + s.missedEntryWindow.reason;
   } else banner.style.display = 'none';
 
   if (s.account) {
     $('equity').textContent = fmtUsd(s.account.equity);
     $('cash').textContent = 'cash ' + fmtUsd(s.account.cash);
   }
-  const realized = s.dailyState ? s.dailyState.realizedPnL : 0;
-  const day = realized + s.unrealizedPl;
+  // True day P&L = current equity vs. equity at the start of today. Grounded in the
+  // broker's actual numbers rather than internal realized/unrealized bookkeeping, which
+  // undercounts trades closed outside the bot's own exit path (e.g. the manual Close
+  // button) since only recordExit()-driven exits get added to dailyState.realizedPnL.
+  let day, realized;
+  if (s.account && s.dailyState && typeof s.dailyState.startEquity === 'number') {
+    day = s.account.equity - s.dailyState.startEquity;
+    realized = day - s.unrealizedPl;
+  } else {
+    realized = s.dailyState ? s.dailyState.realizedPnL : 0;
+    day = realized + s.unrealizedPl;
+  }
   const pnlEl = $('dayPnl');
   pnlEl.textContent = (day >= 0 ? '▲ ' : '▼ ') + fmtUsd(day);
   pnlEl.className = 'value ' + (day >= 0 ? 'delta-up' : 'delta-down');
@@ -254,8 +305,12 @@ function render(s) {
     tbody.insertAdjacentHTML('beforeend',
       '<tr><td>' + p.symbol + '</td><td class="num">' + p.qty + '</td><td class="num">' + p.avgEntryPrice +
       '</td><td class="num">' + (p.currentPrice ?? '—') + '</td><td class="num ' + (pl >= 0 ? 'delta-up' : 'delta-down') + '">' +
-      (pl >= 0 ? '▲ ' : '▼ ') + fmtUsd(pl) + ' (' + (p.unrealizedPlpc * 100).toFixed(1) + '%)</td></tr>');
+      (pl >= 0 ? '▲ ' : '▼ ') + fmtUsd(pl) + ' (' + (p.unrealizedPlpc * 100).toFixed(1) + '%)</td>' +
+      '<td><button class="closeBtn" data-symbol="' + p.symbol + '">Close</button></td></tr>');
   }
+  tbody.querySelectorAll('.closeBtn').forEach((btn) => {
+    btn.addEventListener('click', () => closePosition(btn.dataset.symbol, btn));
+  });
 
   const tt = $('taskTable').querySelector('tbody');
   tt.innerHTML = '';
@@ -283,6 +338,25 @@ function render(s) {
   if (s.latestReview) {
     $('reviewName').textContent = s.latestReview.name;
     $('reviewBody').textContent = s.latestReview.content;
+  }
+
+  if (s.fillQuality) {
+    const fq = s.fillQuality;
+    const pct = (fq.recentAvgFillVsMidPct * 100);
+    const el = $('fillQuality');
+    el.textContent = (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%';
+    el.className = 'value ' + (pct <= 0 ? 'delta-up' : 'delta-down');
+    $('fillQualitySub').textContent = `last ${fq.recentN} fills (all-time avg ${(fq.avgFillVsMidPct * 100).toFixed(1)}%, n=${fq.n})`;
+  } else {
+    $('fillQuality').textContent = '—';
+    $('fillQualitySub').textContent = 'no fills logged yet';
+  }
+
+  if (s.latestAdvisory) {
+    $('advisoryEmpty').style.display = 'none';
+    $('advisoryBox').style.display = 'block';
+    $('advisoryName').textContent = s.latestAdvisory.name;
+    $('advisoryBody').textContent = s.latestAdvisory.content;
   }
 
   $('strategy').textContent =
