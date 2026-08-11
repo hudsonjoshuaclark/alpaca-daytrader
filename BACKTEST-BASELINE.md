@@ -85,3 +85,48 @@ trusting any output:**
   yet to distinguish bad luck from a real problem," same as the underlying-only
   30-trade threshold in AGENT-REVIEW.md, likely more trades needed at the options
   level given the higher variance.
+
+## Relative-strength-vs-SPY entry filter (added 2026-07-28, live in runner.js)
+
+Part of a wider improvement pass (see IMPROVEMENTS-2026-07-28.md for the full research
+list, what else was tested and rejected, and what was deliberately left untouched).
+`lib/marketData.js`'s `computeRelativeStrength()`: at the breakout bar, require the
+symbol to be outperforming SPY (bullish) or underperforming it (bearish) since today's
+open. SPY/QQQ exempt (they ARE the benchmark). Blocks via a new `RELSTRENGTH_BLOCKED`
+event, consumes the day's one ORB attempt for that symbol, same as `NEWS_BLOCKED`.
+
+**90-day validation, cutoff=11:30 (matches live `cfg.ORB_ENTRY_CUTOFF`):**
+
+| Level | Pool | n | expectancy |
+|---|---|---|---|
+| Underlying | unfiltered (apples-to-apples, non-SPY/QQQ) | 324 | +16.38bp |
+| Underlying | filtered (in-favor kept) | 307 | +18.89bp |
+| Underlying | excluded (against) | 17 | -28.96bp |
+| Options (real contracts) | unfiltered (apples-to-apples, non-SPY/QQQ) | 286 | +3044.58bp |
+| Options (real contracts) | filtered (in-favor kept) | 270 | +3315.29bp |
+| Options (real contracts) | excluded (against) | 16 | -1523.74bp |
+
+Same ~16 trades are negative at both levels — cross-validated, not overlapping noise.
+Monthly breakdown (scripts/sweep6-filters.js) shows a small, consistent per-month
+improvement, not one lucky month driving the aggregate. Two filters tested alongside
+this and REJECTED: VWAP-alignment on the breakout bar (excludes 1/412 signals — no
+discriminative power) and excluding CPI/NFP/FOMC days (cuts expectancy from 11.80bp to
+2.95bp; those days alone are 66.93bp — confirms the fat-tail edge above lives
+disproportionately on macro-print days, so blacking them out would have been actively
+harmful). Volatility-regime bucketing (trailing-10d SPY range% tercile) was
+inconclusive (low=19.24bp > mid=11.22bp > high=8.87bp, differences small relative to
+sample size) and not applied.
+
+Walk-forward validation (scripts/walkforward.js, 180 days / 30-day rolling windows)
+separately confirmed the EXISTING `RVOL_MIN=1.5` / cutoff=11:30 rather than suggesting a
+change: the in-sample "best" param combo changes almost every window (an overfitting
+signature), while the live config's expectancy sign holds 4-of-6 positive windows,
+matching the already-documented "positive 3 of 4 months" pattern.
+
+Monte Carlo reshuffle/bootstrap (scripts/montecarlo.js) on the 90-day real-option trade
+list, scaled to actual position sizing (`RISK_PCT_PER_TRADE`=0.30, NOT 100%-per-trade
+compounding): median resampled max drawdown -89%, 5th percentile -98%. This is a real
+tail-risk finding at current sizing, not evidence against the filter above — it's the
+reason `PAUSE_DRAWDOWN_PCT` exists, and the Monte Carlo shows that threshold is
+realistically reachable from bad luck alone. No sizing change was made (RISK_PCT_PER_TRADE
+is a locked risk cap per guard-config.js and out of scope for a filter-validation pass).

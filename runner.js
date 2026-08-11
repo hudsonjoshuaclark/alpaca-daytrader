@@ -503,10 +503,28 @@ async function tick() {
 
 async function main() {
   log('START', { dryRun: DRY_RUN, strategy: 'ORB15', universe: cfg.UNIVERSE });
-  await tick().catch((e) => log('ERROR', { message: e.message }));
-  setInterval(() => {
-    tick().catch((e) => log('ERROR', { message: e.message }));
-  }, POLL_MS);
+  // setInterval fires on a fixed clock regardless of whether the previous tick finished.
+  // A slow tick (broker 5xx/timeout backoff, a big multi-symbol bar fetch) could therefore
+  // run concurrently with the next one — and since a trade is only written to state AFTER
+  // its order is placed, two overlapping ticks can both pass the "no open trade for this
+  // underlying" check and double-enter the same symbol. Skip instead of stacking.
+  let tickInFlight = false;
+  const runTick = async () => {
+    if (tickInFlight) {
+      log('TICK_SKIPPED', { reason: 'previous tick still running' });
+      return;
+    }
+    tickInFlight = true;
+    try {
+      await tick();
+    } catch (e) {
+      log('ERROR', { message: e.message });
+    } finally {
+      tickInFlight = false;
+    }
+  };
+  await runTick();
+  setInterval(runTick, POLL_MS);
 }
 
 main();

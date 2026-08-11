@@ -29,6 +29,12 @@ proof defined below.
 
 ## Nightly checklist
 
+0. **Trader advisory (context only)**: if `logs/reviews/<date>-advisory.md` exists (written
+   earlier tonight by the trader-advisory agent, AGENT-ADVISOR.md), skim it. It's retail
+   attention/sentiment on names in the bot's universe — background color for your report,
+   nothing more. It does NOT substitute for backtest validation under rule 3 above, and a
+   "risk flag" in it is not itself grounds for a code or config change — investigate through
+   the normal bug/drift process like anything else.
 1. **Health**: exactly one `node ... runner.js` process should be running
    (`Get-CimInstance Win32_Process -Filter "Name='node.exe'"`). logs/heartbeat.json should
    be < 2 minutes old. Check logs/runner-stderr-new.log and ERROR events in today's
