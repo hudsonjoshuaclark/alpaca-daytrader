@@ -306,7 +306,10 @@ async function manageOpenTrades(state, positionsBySymbol, bars, newsSignals) {
     if (underlyingBars && underlyingBars.length > 0) {
       const last = underlyingBars[underlyingBars.length - 1];
       const barDay = new Date(last.t).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-      if (barDay === contracts.todayET()) {
+      // Skip while `last` is still the entry/breakout bar — its wick can be past orMid
+      // from before it closed above orHigh, which predates the trade (backtest excludes
+      // this bar too; live didn't, see logs/trade-log.jsonl 2026-08-11 and 2026-08-13).
+      if (barDay === contracts.todayET() && last.t !== trade.barTime) {
         const crossed = trade.direction === 'bullish' ? last.l <= trade.orMid : last.h >= trade.orMid;
         if (crossed) {
           await closeTrade(trade, pl, 'or_mid_stop', state);
@@ -438,6 +441,7 @@ async function tryEnter(symbol, bars, portfolioValue, state, newsForSymbol, inde
     qty: structure.qty,
     direction: signal.direction,
     orMid: signal.orMid,
+    barTime: signal.barTime,
     entryDebit: limitPrice,
     quoteMidAtOrder: quoteMid,
     orderId,
