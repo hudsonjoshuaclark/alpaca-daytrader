@@ -1,6 +1,21 @@
 // Smoke test for the ORB rebuild: module loads, signal computation on today's real
 // bars (with Date.now frozen to a mid-morning moment), structure selection with live
 // quotes, and risk gates.
+//
+// MUST run against throwaway state. The risk-gate checks below call canEnterNewTrade with
+// a hardcoded $1000 portfolio value; that reaches checkAccountGuardrail(), which PERSISTS
+// what it decides. Against the real account (worth more than $1000, high-water mark
+// $2876) that call writes pausedForReview:true to logs/account-guardrails.json and stops
+// the live bot from entering - silently, from a test whose entire job is to prove a change
+// is safe. Confirmed by running it 2026-08-30. These two env vars must be set BEFORE
+// lib/riskManager is required, since it resolves both paths at module load.
+const os = require('os');
+const fsx = require('fs');
+const pathx = require('path');
+const TMP = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'orb-smoke-'));
+process.env.ORB_STATE_FILE = pathx.join(TMP, 'daily-state.json');
+process.env.ORB_GUARDRAILS_FILE = pathx.join(TMP, 'account-guardrails.json');
+process.on('exit', () => { try { fsx.rmSync(TMP, { recursive: true, force: true }); } catch { /* best effort */ } });
 const cfg = require('C:/Users/hudso/alpaca-daytrader/lib/config');
 const md = require('C:/Users/hudso/alpaca-daytrader/lib/marketData');
 const contracts = require('C:/Users/hudso/alpaca-daytrader/lib/contracts');

@@ -131,22 +131,108 @@ function tradeUnrealizedPl(trade, positionsBySymbol) {
   return found === 0 ? null : pl;
 }
 
-async function closeTrade(trade, pnl, reason, state, extra = {}) {
-  if (!DRY_RUN) {
-    if (trade.kind === 'spread') {
-      await orders.closeSpreadMarket(trade.legs, trade.qty);
-    } else {
-      await orders.sellToClose(trade.legs[0].symbol, trade.qty);
+const EXIT_FILL_POLL_ATTEMPTS = 5;
+const EXIT_FILL_POLL_MS = 300;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Net proceeds per contract/spread actually received on a close order, or null if the
+// order has not (yet) reported a usable fill. For a single that is just filled_avg_price;
+// for an mleg it is the net credit, sell legs positive and buy legs negative, which is the
+// same sign convention entryDebit was recorded in.
+function exitCreditFromOrder(order, kind) {
+  if (!order || order.status !== 'filled') return null;
+  if (kind !== 'spread') {
+    const px = parseFloat(order.filled_avg_price);
+    return Number.isFinite(px) ? px : null;
+  }
+  if (!Array.isArray(order.legs) || order.legs.length === 0) return null;
+  let credit = 0;
+  for (const leg of order.legs) {
+    const px = parseFloat(leg.filled_avg_price);
+    if (!Number.isFinite(px)) return null;
+    credit += leg.side === 'sell' ? px : -px;
+  }
+  return credit;
+}
+
+// Reads the actual closing fill back off the exit order and returns the realised P&L.
+//
+// Why this exists: exits go out as MARKET orders (lib/orders.js), which fill at the bid,
+// but the `pnl` passed into closeTrade() is the pre-order unrealized_pl snapshot, which
+// Alpaca marks at the MID. Every exit was therefore booked roughly half a spread better
+// than it actually filled, always in the same direction, and MAX_SPREAD_PCT admits
+// contracts up to 8% wide. The nightly reviews measured the overshoot directly at $2-15
+// per trade on 2026-08-25/26/27/28 and deferred the fix four nights running; across the
+// first 50 live trades that is a few hundred dollars of real loss that never reached
+// state.realizedPnL, and therefore never reached DAILY_LOSS_STOP_PCT, the equity
+// reconciliation in the nightly reports, or any expectancy figure the strategy is judged
+// on. Booking the mark instead of the fill does not just mis-report; it biases every
+// decision made from the numbers.
+//
+// Safety: the close order is ALREADY SUBMITTED before this runs, so nothing here can
+// delay or prevent an exit - the worst case is that the fill is not readable in time and
+// we fall back to the snapshot, exactly the old behaviour, with the source recorded in
+// the log. Bounded at ~1.5s so several exits in one tick cannot overrun the 20s poll.
+async function realizedFromCloseOrder(orderId, trade, fallbackPnl) {
+  if (!orderId) return { pnl: fallbackPnl, source: 'mark_snapshot', exitCredit: null };
+  for (let attempt = 0; attempt < EXIT_FILL_POLL_ATTEMPTS; attempt += 1) {
+    await sleep(EXIT_FILL_POLL_MS);
+    let order;
+    try {
+      order = await orders.getOrder(orderId);
+    } catch (e) {
+      log('ERROR', { message: `exit order lookup ${orderId}: ${e.message}` });
+      continue;
+    }
+    const credit = exitCreditFromOrder(order, trade.kind);
+    if (credit !== null) {
+      return {
+        pnl: Math.round((credit - trade.entryDebit) * 100 * trade.qty * 100) / 100,
+        source: 'fill',
+        exitCredit: credit,
+      };
+    }
+    if (['canceled', 'expired', 'rejected', 'done_for_day'].includes(order.status)) {
+      // The close did NOT go through and the position is still live, but recordExit()
+      // below has already dropped it from state.openTrades. It is recovered by the
+      // untracked-leftover sweep at FORCE_FLATTEN_AT; surface it loudly in the meantime.
+      log('EXIT_ORDER_FAILED', {
+        underlying: trade.underlying,
+        symbol: trade.legs[0].symbol,
+        orderId,
+        status: order.status,
+        message: 'close order did not fill - position may still be open until the flatten sweep',
+      });
+      return { pnl: fallbackPnl, source: 'mark_snapshot_close_failed', exitCredit: null };
     }
   }
-  rm.recordExit(state, trade.orderId, pnl);
+  return { pnl: fallbackPnl, source: 'mark_snapshot_fill_timeout', exitCredit: null };
+}
+
+async function closeTrade(trade, pnl, reason, state, extra = {}) {
+  let realized = { pnl, source: 'dry_run_mark', exitCredit: null };
+  if (!DRY_RUN) {
+    const placed =
+      trade.kind === 'spread'
+        ? await orders.closeSpreadMarket(trade.legs, trade.qty)
+        : await orders.sellToClose(trade.legs[0].symbol, trade.qty);
+    realized = await realizedFromCloseOrder(placed && placed.id, trade, pnl);
+  }
+  rm.recordExit(state, trade.orderId, realized.pnl);
   log(reason === 'force_flatten' ? 'FORCE_FLATTEN' : 'EXIT', {
     symbol: trade.legs[0].symbol,
     underlying: trade.underlying,
     kind: trade.kind,
     reason,
     qty: trade.qty,
-    pnl,
+    pnl: realized.pnl,
+    // Kept alongside so the fill-vs-mark gap is measurable directly from the log rather
+    // than re-derived: pnlAtMark is what every exit before 2026-08-30 recorded.
+    pnlAtMark: pnl,
+    pnlSource: realized.source,
+    exitCredit: realized.exitCredit,
+    entryDebit: trade.entryDebit,
     dryRun: DRY_RUN,
     ...extra,
   });
@@ -169,8 +255,11 @@ async function reconcilePendingOrders(state) {
       log('ERROR', { message: `order lookup ${trade.orderId}: ${e.message}` });
       continue;
     }
-    if (order.status === 'filled') {
+    // Promotes a pending trade to managed. `qty` is what we actually own, which is not
+    // always what was requested — see the partial-fill branch below.
+    const promoteToOpen = (qty, partial) => {
       trade.status = 'open';
+      trade.qty = qty;
       trade.entryDebit = parseFloat(order.filled_avg_price) || trade.entryDebit;
       rm.saveState(state);
       // Execution-quality tracking: how far the actual fill landed from the quoted mid
@@ -189,13 +278,45 @@ async function reconcilePendingOrders(state) {
         premium: trade.entryDebit,
         orMid: trade.orMid,
         quoteMidAtOrder: trade.quoteMidAtOrder,
+        spreadPctAtOrder: trade.spreadPctAtOrder,
         fillVsMid,
         fillVsMidPct,
+        partialFill: partial || undefined,
+        requestedQty: partial ? trade.requestedQty : undefined,
         dryRun: false,
       });
+    };
+
+    // filled_qty survives cancellation: an order can be PARTIALLY filled and then canceled,
+    // and the terminal status is 'canceled' with a non-zero filled_qty.
+    const filledQty = parseInt(order.filled_qty, 10) || 0;
+
+    if (order.status === 'filled') {
+      promoteToOpen(trade.qty, false);
     } else if (['canceled', 'expired', 'rejected', 'done_for_day'].includes(order.status)) {
-      rm.removeTrade(state, trade.orderId);
-      log('ENTRY_UNFILLED', { underlying: trade.underlying, orderId: trade.orderId, status: order.status });
+      if (filledQty > 0) {
+        // A partial fill used to be silently abandoned. `partially_filled` is not in the
+        // 'filled' branch, so the trade stayed 'pending' until ENTRY_ORDER_TTL_MS, got
+        // canceled, and then landed here — where removeTrade() dropped it on the basis of
+        // the status alone, ignoring filled_qty. The contracts were really owned: no
+        // option_stop, no or_mid_stop, no ratchet, no concurrency slot, and nothing would
+        // have closed them before the 15:45 untracked sweep. Never observed live (all 15
+        // ENTRY_UNFILLED events so far had filled_qty 0), but a multi-contract marketable
+        // limit is exactly the order type that partial-fills. Adopt what we own instead.
+        trade.requestedQty = trade.qty;
+        log('ENTRY_PARTIAL_FILL', {
+          underlying: trade.underlying,
+          orderId: trade.orderId,
+          status: order.status,
+          requestedQty: trade.qty,
+          filledQty,
+          message: 'adopting the filled quantity as a managed position',
+        });
+        promoteToOpen(filledQty, true);
+      } else {
+        rm.removeTrade(state, trade.orderId);
+        log('ENTRY_UNFILLED', { underlying: trade.underlying, orderId: trade.orderId, status: order.status });
+      }
     } else if (Date.now() - new Date(trade.enteredAt).getTime() > cfg.ENTRY_ORDER_TTL_MS) {
       try {
         await orders.cancelOrder(trade.orderId);
@@ -241,10 +362,39 @@ async function manageOpenTrades(state, positionsBySymbol, bars, newsSignals) {
     const pl = tradeUnrealizedPl(trade, positionsBySymbol);
     if (pl === null) {
       if (!DRY_RUN) {
-        rm.removeTrade(state, trade.orderId);
-        log('TRADE_GONE', { underlying: trade.underlying, message: 'no legs found in account positions' });
+        // A trade whose legs have vanished was closed outside the bot - the dashboard's
+        // manual Close button, or anything done in Alpaca's own UI. This used to call bare
+        // removeTrade(), which drops the position WITHOUT adding its P&L to
+        // state.realizedPnL (unlike recordExit(), which every bot-initiated exit uses).
+        // That is not just a display gap: canEnterNewTrade() reads state.realizedPnL for
+        // the DAILY_LOSS_STOP_PCT circuit breaker, so a large externally-closed LOSS would
+        // silently fail to trip the daily loss stop and the bot would keep entering.
+        // Confirmed live 2026-07-24 - a manual close moved equity $1003 -> $2362 while
+        // realizedPnL stayed at 0.
+        //
+        // lastSeenPl is this trade's unrealised P&L from the most recent tick that still
+        // saw its legs, so it is at most one poll interval stale. Recorded as an estimate
+        // rather than left out entirely: a slightly-off number keeps the circuit breaker
+        // working, a missing one disables it.
+        const estimated = typeof trade.lastSeenPl === 'number' ? trade.lastSeenPl : 0;
+        rm.recordExit(state, trade.orderId, estimated);
+        log('TRADE_GONE', {
+          underlying: trade.underlying,
+          message: 'no legs found in account positions - closed outside the bot',
+          pnl: estimated,
+          pnlIsEstimate: true,
+          pnlSource: typeof trade.lastSeenPl === 'number' ? 'last observed unrealized_pl' : 'none available, counted as 0',
+        });
       }
       continue;
+    }
+
+    // Remembered so the TRADE_GONE branch above has a P&L to record if this position is
+    // closed outside the bot before the next tick. Persisted (rather than kept in memory)
+    // so it also survives a runner restart while a position is open.
+    if (trade.lastSeenPl !== pl) {
+      trade.lastSeenPl = pl;
+      rm.saveState(state);
     }
 
     // per-trade custom $ stop/target (optional - only set on manually-entered trades that
@@ -412,13 +562,57 @@ async function tryEnter(symbol, bars, portfolioValue, state, newsForSymbol, inde
 
   let limitPrice;
   let quoteMid;
+  // The bid/ask ACTUALLY ACCEPTED at the gate, recorded so the MAX_SPREAD_PCT question can
+  // eventually be answered from data. As of 2026-08-31 it cannot be: logs/option-cache-orb.js
+  // holds OHLC bars with no contemporaneous quotes, and the trade log never kept the spread
+  // it accepted, so the 0/4/8% cost grids in the sweeps are a MODELLED cost, not a measured
+  // one. scripts/orb-leverage-vs-friction.js shows why this matters - at an 8% spread the
+  // round-trip friction (5.0% of premium) exceeds the entire gross directional edge that
+  // +8.1bp of underlying edge buys at 48x option leverage (3.89%). That is a hypothesis
+  // until these fields exist for a few hundred trades. Costs nothing: the quote is already
+  // in hand here.
+  //
+  // The EXIT side needs no new field - EXIT already logs pnl (the fill) alongside pnlAtMark
+  // (the mid-mark), and their difference IS the realised half-spread paid to get out.
+  let quoteBid;
+  let quoteAsk;
   if (structure.kind === 'single') {
     quoteMid = structure.quote.mid;
+    quoteBid = structure.quote.bid;
+    quoteAsk = structure.quote.ask;
     limitPrice = orders.entryLimitFromQuote(structure.quote);
   } else {
     quoteMid = structure.quote.long.mid - structure.quote.short.mid;
-    const netWorst = structure.quote.long.ask - structure.quote.short.bid;
-    limitPrice = orders.roundTick(quoteMid + 0.25 * (netWorst - quoteMid));
+    // Net debit paid at the worst of both legs vs received at the best of both.
+    quoteBid = structure.quote.long.bid - structure.quote.short.ask;
+    quoteAsk = structure.quote.long.ask - structure.quote.short.bid;
+    limitPrice = orders.roundTick(quoteMid + 0.25 * (quoteAsk - quoteMid));
+  }
+  const spreadPctAtOrder = quoteMid > 0 ? +(((quoteAsk - quoteBid) / quoteMid) * 100).toFixed(2) : null;
+
+  // MAX_SPREAD_PCT is enforced PER LEG in lib/contracts.js:99, but for a two-leg debit
+  // vertical the net bid-ask is the SUM of both legs' absolute spreads measured against a
+  // net mid SMALLER than either leg's. Two legs each comfortably inside an 8% cap routinely
+  // net out at 15-25%, so the gate does not bound what it appears to bound on this path -
+  // and the spread path is used precisely for the expensive names (TSLA/META/MSFT/COIN/MSTR)
+  // that a small account cannot reach with a single. Live, n is tiny but points the same
+  // way: singles -2.02%/trade (n=44) vs spreads -15.39%/trade (n=6).
+  //
+  // Deliberately WARNS rather than blocks. Net-spread gating would silently drop the
+  // expensive half of the universe, and how many signals that costs cannot be measured
+  // from the existing cache (OHLC bars, no quotes). This makes the breach visible on the
+  // first occurrence so the decision can be made from data rather than from this comment.
+  if (structure.kind === 'spread' && spreadPctAtOrder != null && spreadPctAtOrder > cfg.MAX_SPREAD_PCT) {
+    log('NET_SPREAD_OVER_CAP', {
+      symbol,
+      netSpreadPct: spreadPctAtOrder,
+      maxSpreadPct: cfg.MAX_SPREAD_PCT,
+      legSpreadPct: {
+        long: +(((structure.quote.long.ask - structure.quote.long.bid) / structure.quote.long.mid) * 100).toFixed(2),
+        short: +(((structure.quote.short.ask - structure.quote.short.bid) / structure.quote.short.mid) * 100).toFixed(2),
+      },
+      message: 'both legs passed the per-leg cap but the net spread exceeds it - not blocked, see runner.js',
+    });
   }
   if (limitPrice <= 0) {
     log('NO_STRUCTURE', { symbol, reason: 'non-positive limit price' });
@@ -444,6 +638,9 @@ async function tryEnter(symbol, bars, portfolioValue, state, newsForSymbol, inde
     barTime: signal.barTime,
     entryDebit: limitPrice,
     quoteMidAtOrder: quoteMid,
+    quoteBidAtOrder: quoteBid,
+    quoteAskAtOrder: quoteAsk,
+    spreadPctAtOrder,
     orderId,
     status: 'pending',
     enteredAt: new Date().toISOString(),
@@ -456,25 +653,84 @@ async function tryEnter(symbol, bars, portfolioValue, state, newsForSymbol, inde
     qty: structure.qty,
     limitPrice,
     rvol: signal.rvol.toFixed(2),
+    // Which bar produced this signal, and how long after that bar CLOSED the order went
+    // out. Added 2026-08-30: the still-forming-bar bug in lib/marketData.js could only be
+    // detected by inferring bar alignment from ENTRY_ORDER timestamps, because barTime was
+    // never logged. barAgeSec must now always be >= 0; a negative value means the
+    // closed-bar guard has regressed.
+    barTime: signal.barTime,
+    barAgeSec: Math.round((Date.now() - (new Date(signal.barTime).getTime() + 5 * 60 * 1000)) / 1000),
+    quoteBid,
+    quoteAsk,
+    spreadPctAtOrder,
     dryRun: DRY_RUN,
   });
 }
 
+// Last successful /v2/positions read, kept so a transient positions outage degrades to
+// managing open trades from a slightly stale snapshot instead of skipping management
+// entirely. Module-level so it survives across ticks; never persisted, because a
+// snapshot from before a restart is too old to make a stop decision from.
+let lastPositionsSnapshot = null;
+
 async function tick() {
   writeHeartbeat();
   if (!isMarketHours()) return;
+  // Per-tick, not module-level: a stale read must not suppress entries on later ticks.
+  let positionsAreStale = false;
 
-  const account = await orders.getAccount();
-  const portfolioValue = parseFloat(account.equity);
+  // /v2/account is the call that has actually failed in production (2026-08-10 DNS/TLS,
+  // 2026-08-13 timeouts), and letting it throw aborted the ENTIRE tick - including
+  // manageOpenTrades' stop checks and the 15:45 flatten. That is precisely backwards: with
+  // a position open, exiting matters far more than entering. Equity is only needed to SIZE
+  // a new entry, so degrade instead of dying - keep managing and flattening what's open,
+  // and skip only new entries until the account call recovers.
+  let portfolioValue = null;
+  try {
+    const equity = parseFloat((await orders.getAccount()).equity);
+    if (Number.isFinite(equity)) portfolioValue = equity;
+  } catch (e) {
+    log('ACCOUNT_UNAVAILABLE', { message: e.message, effect: 'managing open trades only, no new entries this tick' });
+  }
   const state = rm.loadState();
-  if (state.startEquity === null) {
+  if (state.startEquity === null && portfolioValue !== null) {
     state.startEquity = portfolioValue;
     rm.saveState(state);
   }
 
   await reconcilePendingOrders(state);
 
-  const livePositions = DRY_RUN ? [] : await orders.getAllPositions();
+  // /v2/positions gets the SAME degrade-don't-die treatment as /v2/account above, and for
+  // a stronger reason. An unguarded throw here reaches the top-level catch in runTick(),
+  // which skips manageOpenTrades() AND the 15:45 flatten - so the one endpoint failure
+  // that leaves open 0DTE options completely unmanaged was the one still unprotected. The
+  // 2026-08-10 outage (ENOTFOUND then ERR_TLS_CERT_ALTNAME_INVALID, ~2h) hit /v2/account
+  // and got hardened; nothing about that outage was specific to that path.
+  //
+  // Falling back to the previous tick's snapshot is deliberate: a stop evaluated on marks
+  // up to a poll or two old is worse than a fresh one but far better than no stop check at
+  // all, and every exit is a market order that does not depend on the stale price. Entries
+  // are suppressed while degraded, since the snapshot cannot prove a position is absent.
+  let livePositions = null;
+  if (!DRY_RUN) {
+    try {
+      livePositions = await orders.getAllPositions();
+      lastPositionsSnapshot = livePositions;
+    } catch (e) {
+      if (!lastPositionsSnapshot) {
+        log('ERROR', { message: `positions unavailable and no prior snapshot: ${e.message}` });
+        return;
+      }
+      livePositions = lastPositionsSnapshot;
+      positionsAreStale = true;
+      log('POSITIONS_UNAVAILABLE', {
+        message: e.message,
+        effect: 'managing open trades from the previous snapshot, no new entries this tick',
+      });
+    }
+  } else {
+    livePositions = [];
+  }
   const positionsBySymbol = new Map(livePositions.map((p) => [p.symbol, p]));
 
   if (rm.shouldForceFlatten()) {
@@ -495,7 +751,10 @@ async function tick() {
   await manageOpenTrades(state, positionsBySymbol, bars, newsSignals);
 
   // entries: one ORB attempt per symbol per day
-  if (rm.nowET() < cfg.ORB_ENTRY_CUTOFF) {
+  // positionsAreStale gates entries as well as portfolioValue: the opposing-position
+  // interlock and the concurrency count in tryEnter both read positionsBySymbol, and a
+  // stale map cannot prove a position is absent.
+  if (portfolioValue !== null && !positionsAreStale && rm.nowET() < cfg.ORB_ENTRY_CUTOFF) {
     for (const symbol of cfg.UNIVERSE) {
       if (state.tradedUnderlyings.includes(symbol)) continue;
       if (state.openTrades.some((t) => t.underlying === symbol)) continue;
@@ -531,4 +790,12 @@ async function main() {
   setInterval(runTick, POLL_MS);
 }
 
-main();
+// Only start the live loop when this file IS the process entry point (that is how
+// scripts/restart-runner.ps1 launches it). Guarding it means the pure helpers below can be
+// required by a test without the requiring process silently becoming a second live runner
+// against the same account — which the duplicate-runner checks in the nightly review exist
+// precisely to catch.
+if (require.main === module) main();
+
+// Exported for tests only. Nothing in the live path imports this module.
+module.exports = { exitCreditFromOrder };

@@ -48,10 +48,48 @@ proof defined below.
    pays off): What fraction of ENTRY_ORDERs went unfilled? Are fills much worse than the
    limit price? Are or_mid_stop exits firing far past the midpoint (polling lag)? Are
    spreads eating winners? Bug fixes and execution improvements here are always in scope.
-4. **Drift check**: with the CUMULATIVE live history (performance-history.jsonl), compare
-   win rate and avg win/loss against BACKTEST-BASELINE.md. With < 30 cumulative live
-   trades, note the numbers and do nothing. Divergence on >= 30 trades justifies
-   INVESTIGATION (re-run sweeps on recent data), which may justify a validated change.
+4. **Drift check**: test EXPECTANCY, not win rate.
+
+   Rewritten 2026-08-30. The old instruction was "compare win rate and avg win/loss",
+   and for eight consecutive nights (08-21 .. 08-28) it produced the same conclusion:
+   live 31.25% vs baseline 40.2% is ~1.3 standard errors, "inside noise", no change. That
+   conclusion was correct about win rate and useless, because win rate is a low-power
+   statistic on a distribution this fat-tailed — the baseline's own edge comes from rare
+   +100%-and-up trades, so a strategy can miss its expectancy by 20 percentage points
+   while its win rate stays comfortably inside the noise band. Run BOTH of these:
+
+   a. **Per-trade return.** Join each EXIT to its ENTRY by option symbol, cost basis =
+      `premium * 100 * qty`, return = `pnl / costBasis`. Report n, mean, sd, SE, and the
+      t-statistic against BOTH zero and the BACKTEST-BASELINE.md figure. On 2026-08-30 at
+      n=50 this read: mean -3.62%, SE 4.55%, t vs zero -0.80 (noise — the live edge being
+      negative is NOT established), t vs the baseline's +20.18% **-5.24, p < 1e-6**. The
+      second number is the one that matters for sizing, and win rate never showed it.
+
+   b. **Like-for-like, or say it isn't.** BACKTEST-BASELINE.md's options figures come from
+      `sweep5-options.js`, which simulates only option_stop / or_mid_stop / EOD and has NO
+      RATCHET. Live takes 38 of 50 exits via `trail_stop` and zero via EOD, and
+      substitutes debit spreads for expensive underlyings where the sim models a single
+      ATM option. So the headline comparison is partly strategy drift and partly
+      apples-to-oranges. Say which you are claiming. A clean parity test needs a frozen
+      sim matching the live ratchet, the relative-strength filter, the spread fallback and
+      realistic friction; until that exists, treat the baseline as an upper bound only.
+
+   With < 30 cumulative live trades, note the numbers and do nothing. Divergence on >= 30
+   trades justifies INVESTIGATION (re-run sweeps on recent data), which may justify a
+   validated change. **A t-stat past 3 against the baseline is not "noise" at any n** —
+   escalate it rather than repeating the previous night's wording.
+
+4b. **Account scope — read this before writing any reconciliation.** ORB-15 owns Alpaca
+   paper account **PA31D3KKVK1D** alone. Every review from 08-21 to 08-28 explained equity
+   residuals as "credit-spread / overnight-drift / overnight-momentum trading live on the
+   same paper account". That is FALSE and was verified false on 2026-08-30 by reading
+   `/v2/account` with each bot's own key: the four bots are on four separate accounts
+   (ORB-15 PA31D3KKVK1D $2252.36, overnight-momentum PA3AA9K57G7R, overnight-drift
+   PA3DXXHZPDZO, credit-spread PA36ESFD2O10), each near its own $1000 baseline. Re-verify
+   with that command before attributing anything to another bot. An equity delta that does
+   not match ORB-15's realizedPnL is ORB-15's own unexplained residual — most likely the
+   fill-vs-mark gap, which `EXIT.pnlSource` now records directly — and must be
+   investigated, not explained away.
 5. **Report**: write logs/reviews/YYYY-MM-DD.md — outcome first (equity, day P&L, trades),
    then health, execution quality, drift, and exactly what you changed (with evidence) or
    why you changed nothing. Plain sentences, no filler.
