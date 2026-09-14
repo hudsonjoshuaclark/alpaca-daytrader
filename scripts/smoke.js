@@ -16,11 +16,11 @@ const TMP = fsx.mkdtempSync(pathx.join(os.tmpdir(), 'orb-smoke-'));
 process.env.ORB_STATE_FILE = pathx.join(TMP, 'daily-state.json');
 process.env.ORB_GUARDRAILS_FILE = pathx.join(TMP, 'account-guardrails.json');
 process.on('exit', () => { try { fsx.rmSync(TMP, { recursive: true, force: true }); } catch { /* best effort */ } });
-const cfg = require('C:/Users/hudso/alpaca-daytrader/lib/config');
-const md = require('C:/Users/hudso/alpaca-daytrader/lib/marketData');
-const contracts = require('C:/Users/hudso/alpaca-daytrader/lib/contracts');
-const rm = require('C:/Users/hudso/alpaca-daytrader/lib/riskManager');
-const orders = require('C:/Users/hudso/alpaca-daytrader/lib/orders');
+const cfg = require('../lib/config');
+const md = require('../lib/marketData');
+const contracts = require('../lib/contracts');
+const rm = require('../lib/riskManager');
+const orders = require('../lib/orders');
 
 async function main() {
   console.log('modules loaded ok');

@@ -1,4 +1,36 @@
+// ############################################################################
+// # RETIRED 2026-08-14. This bot is stopped, its scheduled task              #
+// # (AlpacaSwingSignalsRunner) is DISABLED, and its account now runs         #
+// # strategies/overnight-momentum/ instead. Do not restart it without        #
+// # reading the measurement below - it has no demonstrated edge.             #
+// # Code and logs are kept for history, not for use.                         #
+// ############################################################################
+//
 // Config for the RSI-pullback swing-signal strategy - fully isolated, own env var names.
+//
+// !!!! 2026-08-13 - THIS STRATEGY HAS NO DEMONSTRATED EDGE AS DEPLOYED. Measured, not
+// suspected: scripts/strategy-swing-signalrate-sweep.js re-ran 365 days x 56 symbols
+// counting ONLY signals inside the live entry window, and the deployed setting
+// (ema=50, rsi=30, win=09:45) scores n=18 over 251 trading days -> 18 trades/YEAR at
+// +0.1bp/trade. Not a small edge - indistinguishable from zero, on a sample an order of
+// magnitude below this project's 200-trade bar. That matches live behaviour exactly: ZERO
+// trades taken in the 11 sessions since deployment. The time-of-day breakdown reproduced
+// the 2026-08-03 finding below almost exactly (5.2% of raw signals in-window vs 5.5%).
+//
+// A 24-combo grid over RSI threshold (30/35/40/45), window start (09:35/09:45/10:00) and
+// trend EMA (50/20) found NO deployable replacement:
+//   - rsi=35 looks best on the surface (n=177, +7.6bp, 53.1% wins) but its edge is entirely
+//     in the last 30% of the sample - in-sample expectancy is NEGATIVE (-3.4bp). That is a
+//     regime artifact, not an edge.
+//   - rsi=45/ema=20 rows pass a naive statistical filter but demand ~16,000 trades/year
+//     (63/day on a $1000 account) at +1.0bp with 330% max drawdown - below transaction
+//     cost and untradeable.
+// Nothing was changed on this evidence: "no change" beats deploying a fitted variant.
+// The real options are to retire this bot or replace the strategy outright - a human call.
+// See SESSION-AUDIT-2026-08-13.md.
+//
+// The pre-existing 2026-08-02 header follows, kept because it documents how the invalid
+// n=324 figure was produced. Treat every number in it as SUPERSEDED by the above.
 // Validated 2026-08-02 (scripts/strategy-swing-sweep.js, 365 real days, n=324, clears this
 // project's 200-trade bar): signal = price above EMA(50) (uptrend filter) + RSI(14) crosses
 // back up through 30 (pullback entry), on the lib/watchlist.js universe. Two stop/target

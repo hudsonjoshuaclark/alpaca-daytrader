@@ -15,7 +15,7 @@
 // transactionAcquiredDisposedCode='A' (acquired) in the NON-derivative table - real cash
 // spent buying the stock on the open market. Routine RSU/option grants (code 'A', $0
 // price) and 10b5-1 scheduled sales are noise and explicitly excluded.
-const SEC_UA = 'alpaca-daytrader-research contact:hudsonjoshuaclark@gmail.com';
+const SEC_UA = process.env.SEC_USER_AGENT || 'alpaca-daytrader-research contact:your-email@example.com';
 
 async function fetchText(url) {
   const res = await fetch(url, { headers: { 'User-Agent': SEC_UA } });

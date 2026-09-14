@@ -1,4 +1,26 @@
 // Config for the 0DTE put credit spread strategy - fully isolated, own env var names.
+//
+// !! ON PROBATION as of 2026-08-14. From launch until 2026-08-13 this bot NEVER HELD A
+// SPREAD: a sign error on Alpaca's mleg fill price (a net credit is reported as a NEGATIVE
+// filled_avg_price) inverted both exit tests, so all 3 trades it placed closed on a false
+// "profit_target" within 0.4s of filling. Account sits at $992.48 - that -$7.52 is the bug,
+// not the strategy, so the n=247 / 71.7% evidence below has still never been tested live.
+// Kept rather than replaced for exactly that reason. Trial terms, fixed in advance:
+//   REVIEW AFTER 20 completed trades or 2026-09-15, whichever comes first.
+//   RETIRE IF: win rate < 55% (vs 71.7% backtested), OR realized P&L is negative at review,
+//   OR it again fails to hold positions for a meaningful duration.
+//
+// Known headwind, measured from the 3 real fills the bug produced (the fills were genuine
+// even though the exit reason was not) - round-trip slippage as a share of credit collected:
+//   08-06  credit 0.34 -> close 0.37   ~8.8%
+//   08-11  credit 0.17 -> close 0.19  ~11.8%
+//   08-13  credit 0.13 -> close 0.15  ~15.4%
+// The backtest below models exits at option bar CLOSE prices with NO bid/ask cost, while
+// live exits are market orders crossing the spread both ways. At ~10% of credit on a ~0.20
+// credit / ~2.80 max risk structure that is roughly 70bp of drag against a backtested
+// +168bp - i.e. expect materially less than the headline number, though still positive.
+// Do not treat a result below +168bp as evidence the strategy is broken; treat a NEGATIVE
+// result, or a win rate far under 71.7%, as the actual kill signal.
 // Validated 2026-07-31 (scripts/strategy-creditspread-sweep.js, 180 days, n=247,
 // well past this project's 200-trade evidentiary bar): 71.7% win rate, +168.01bp
 // expectancy (of max risk). Per-symbol: SPY 71.0%/n=124, QQQ 72.4%/n=123 - consistent

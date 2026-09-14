@@ -79,7 +79,16 @@ async function reconcilePendingOrders(state) {
     }
     if (order.status === 'filled') {
       trade.status = 'open';
-      trade.actualNetCredit = parseFloat(order.filled_avg_price) || trade.netCredit;
+      // Alpaca reports an mleg fill as a SIGNED net price: negative when the combo was
+      // opened for a net credit. Verified live 2026-08-13 - limit_price 0.13 filled with
+      // filled_avg_price -0.13 (legs: sold QQQ 719P @0.25, bought 716P @0.12). Storing
+      // that raw made entryCreditTotal negative in manageOpenTrades, which inverted BOTH
+      // exit tests: the profit-target check became `pl >= -6.50`, true the instant the
+      // spread opened. Every trade this bot ever placed (2026-08-06, 08-11, 08-13) closed
+      // on "profit_target" within 0.4s of filling, each for a small loss. Normalise to a
+      // positive credit, which is what the rest of the file assumes.
+      const filledNet = Math.abs(parseFloat(order.filled_avg_price));
+      trade.actualNetCredit = Number.isFinite(filledNet) && filledNet > 0 ? filledNet : trade.netCredit;
       rm.saveState(state);
       log('ENTRY', { underlying: trade.underlying, shortLeg: trade.shortLeg.symbol, longLeg: trade.longLeg.symbol, qty: trade.qty, netCredit: trade.actualNetCredit });
     } else if (['canceled', 'expired', 'rejected', 'done_for_day'].includes(order.status)) {
@@ -118,11 +127,33 @@ async function manageOpenTrades(state, positionsBySymbol) {
     if (trade.status !== 'open') continue;
     const pl = tradeUnrealizedPl(trade, positionsBySymbol);
     if (pl === null) {
-      rm.removeTrade(state, trade.orderId);
-      log('TRADE_GONE', { underlying: trade.underlying, message: 'no legs found in account positions' });
+      // Closed outside the bot (dashboard Close button, Alpaca UI). removeTrade() alone
+      // drops the P&L on the floor, which quietly disables the daily-loss circuit breaker
+      // in canEnterNewTrade() - see the long note in ../../runner.js. Record the last
+      // observed unrealised P&L instead: at most one 20s tick stale.
+      const estimated = typeof trade.lastSeenPl === 'number' ? trade.lastSeenPl : 0;
+      rm.recordExit(state, trade.orderId, estimated);
+      log('TRADE_GONE', {
+        underlying: trade.underlying, message: 'no legs found in account positions - closed outside the bot',
+        pnl: estimated, pnlIsEstimate: true,
+      });
       continue;
     }
+    if (trade.lastSeenPl !== pl) {
+      trade.lastSeenPl = pl;
+      rm.saveState(state);
+    }
     const entryCreditTotal = trade.actualNetCredit * 100 * trade.qty;
+    // Defence in depth: both tests below are scaled by the credit, so a non-positive value
+    // silently inverts them (see the sign note in reconcilePendingOrders). Never act on a
+    // nonsensical credit - leave the spread to the 15:45 flatten instead.
+    if (!(entryCreditTotal > 0)) {
+      log('ERROR', {
+        underlying: trade.underlying,
+        message: `non-positive entry credit ${trade.actualNetCredit} - exit checks skipped, holding to force_close`,
+      });
+      continue;
+    }
     if (pl >= entryCreditTotal * cfg.PROFIT_TARGET_PCT) {
       await closeTrade(trade, pl, 'profit_target', state);
       continue;
@@ -184,8 +215,17 @@ async function tick() {
   writeHeartbeat();
   if (!isMarketHours()) return;
 
-  const account = await orders.getAccount();
-  const portfolioValue = parseFloat(account.equity);
+  // Letting /v2/account throw aborted the ENTIRE tick - profit-target/stop checks and the
+  // 15:45 flatten included, which on a 0DTE spread is the last thing you want to skip
+  // (assignment risk if it is still open at the close). Equity is only needed for the
+  // max-risk-vs-equity entry check, so degrade: manage and flatten, skip new entries.
+  let portfolioValue = null;
+  try {
+    const equity = parseFloat((await orders.getAccount()).equity);
+    if (Number.isFinite(equity)) portfolioValue = equity;
+  } catch (e) {
+    log('ACCOUNT_UNAVAILABLE', { message: e.message, effect: 'managing open trades only, no new entries this tick' });
+  }
   const state = rm.loadState();
 
   await reconcilePendingOrders(state);
@@ -207,7 +247,7 @@ async function tick() {
   await manageOpenTrades(state, positionsBySymbol);
 
   const t = rm.nowET();
-  if (t >= cfg.ENTRY_WINDOW_START && t < cfg.ENTRY_WINDOW_END) {
+  if (portfolioValue !== null && t >= cfg.ENTRY_WINDOW_START && t < cfg.ENTRY_WINDOW_END) {
     for (const symbol of cfg.SYMBOLS) {
       if (state.tradedSymbols.includes(symbol)) continue;
       await tryEnter(symbol, portfolioValue, state);
@@ -217,10 +257,27 @@ async function tick() {
 
 async function main() {
   log('START', { dryRun: DRY_RUN, strategy: 'CreditSpread0DTE', symbols: cfg.SYMBOLS });
-  await tick().catch((e) => log('ERROR', { message: e.message }));
-  setInterval(() => {
-    tick().catch((e) => log('ERROR', { message: e.message }));
-  }, POLL_MS);
+  // setInterval fires on a fixed clock regardless of whether the previous tick finished.
+  // A slow tick (broker 5xx/timeout backoff) could otherwise run concurrently with the
+  // next one and double-enter, since a position is only recorded in state AFTER its order
+  // is placed. Skip instead of stacking.
+  let tickInFlight = false;
+  const runTick = async () => {
+    if (tickInFlight) {
+      log('TICK_SKIPPED', { reason: 'previous tick still running' });
+      return;
+    }
+    tickInFlight = true;
+    try {
+      await tick();
+    } catch (e) {
+      log('ERROR', { message: e.message });
+    } finally {
+      tickInFlight = false;
+    }
+  };
+  await runTick();
+  setInterval(runTick, POLL_MS);
 }
 
 main();

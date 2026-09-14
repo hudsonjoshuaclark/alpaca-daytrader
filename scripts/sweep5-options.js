@@ -8,6 +8,8 @@
 // cutting every trade short before the validated orMid/EOD exit ever gets a chance.
 //
 // Usage: node --env-file=.env scripts/sweep5-options.js [days]
+const fs = require('fs');
+const path = require('path');
 const client = require('../lib/alpacaClient');
 const { rollingAvgVolume } = require('../lib/indicators');
 const cfg = require('../lib/config');
@@ -257,6 +259,11 @@ async function main() {
       const top5 = [...tagged].sort((a, b) => b.r - a.r).slice(0, 5);
       console.log('  TOP 5 WINNERS (for data-quality check):');
       for (const t of top5) console.log(`    ${t.symbol} ${t.day} ${t.occ} entry=${t.entryTime} r=${(t.r * 100).toFixed(1)}% exit=${t.exit}`);
+      // Dump the live-config (0.55) trade list for scripts/montecarlo.js to reshuffle/
+      // resample - this is real resolved-option-contract data, expensive to regenerate.
+      const dumpFile = path.join(__dirname, '..', 'logs', 'sweep5-trades.json');
+      fs.writeFileSync(dumpFile, JSON.stringify(tagged.map((t) => t.r)));
+      console.log(`  wrote ${tagged.length} trade returns to ${dumpFile}`);
     }
   }
 }

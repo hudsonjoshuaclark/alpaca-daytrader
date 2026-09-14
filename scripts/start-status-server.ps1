@@ -10,7 +10,7 @@ foreach ($p in $existing) {
 Start-Sleep -Seconds 1
 
 Start-Process -FilePath "C:\Program Files\nodejs\node.exe" `
-    -ArgumentList '--env-file=.env', 'status-server.js' `
+    -ArgumentList '--env-file=.env', '--env-file=strategies\overnight-drift\.env.overnight', '--env-file=strategies\credit-spread\.env.creditspread', '--env-file=strategies\overnight-momentum\.env.overnightmomentum', 'status-server.js' `
     -WorkingDirectory $repo -WindowStyle Hidden `
     -RedirectStandardOutput (Join-Path $repo 'logs\status-server-stdout.log') `
     -RedirectStandardError (Join-Path $repo 'logs\status-server-stderr.log')

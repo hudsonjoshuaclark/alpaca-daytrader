@@ -77,8 +77,17 @@ async function main() {
     if (trade.status !== 'open') continue;
     const pnl = tradeUnrealizedPl(trade, positionsBySymbol);
     if (pnl === null) {
-      rm.removeTrade(state, trade.orderId);
-      log('TRADE_GONE', { underlying: trade.underlying, message: 'no legs found in account positions' });
+      // Closed outside the bot overnight (dashboard Close button, Alpaca UI). This bot has
+      // no polling loop, so there is no last-observed P&L to fall back on - but dropping
+      // the trade via removeTrade() also silently omits it from state.realizedPnL, making
+      // the bot's own reported performance wrong. Record it as zero EXPLICITLY and say so,
+      // rather than leaving a trade that happened invisible in the running total.
+      rm.recordExit(state, trade.orderId, 0);
+      log('TRADE_GONE', {
+        underlying: trade.underlying,
+        message: 'no legs found in account positions - closed outside the bot between runs',
+        pnl: 0, pnlIsEstimate: true, pnlSource: 'unknown, counted as 0 - realizedPnL understates this trade',
+      });
       continue;
     }
     if (!DRY_RUN) {

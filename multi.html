@@ -66,6 +66,55 @@
   .pill { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--ink-2); border: 1px solid var(--border); border-radius: 999px; padding: 2px 9px; }
   .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
 
+  /* --- Hero: market state, money, verdict. Colour encodes meaning only - "market closed"
+     is neutral grey, never red, because a quiet weekend is not a problem. --- */
+  .hero { background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--muted); border-radius: 12px; padding: 18px 20px; margin-bottom: 12px; }
+  .hero.tone-good { border-left-color: var(--up); }
+  .hero.tone-loss { border-left-color: var(--down); }
+  .hero.tone-warning { border-left-color: var(--warning); }
+  .hero.tone-critical { border-left-color: var(--critical); }
+  .hero.tone-idle { border-left-color: var(--muted); }
+  .heroTop { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 14px; margin-bottom: 12px; }
+  .heroVerdict { font-size: 17px; font-weight: 650; line-height: 1.3; flex: 1 1 320px; }
+  .heroStats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
+  .heroStat .label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 3px; }
+  .heroStat .value { font-size: 26px; font-weight: 650; font-variant-numeric: tabular-nums; line-height: 1.1; }
+  .heroStat .sub { font-size: 11px; color: var(--muted); margin-top: 2px; font-variant-numeric: tabular-nums; }
+
+  .healthRow { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--grid); }
+  .hchip { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; color: var(--ink-2); }
+  .hchip .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .problem { font-size: 12.5px; color: var(--ink-2); margin-top: 8px; display: flex; gap: 7px; align-items: flex-start; }
+  .problem .badge { flex: none; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; padding: 1px 6px; border-radius: 4px; }
+  .badge.critical { background: var(--critical); color: #fff; }
+  .badge.warning { background: var(--warning); color: #1a1a19; }
+
+  /* --- Unified timeline: every real move, all four bots, one column --- */
+  .today { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px 20px; margin-bottom: 16px; }
+  .todayHead { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; margin-bottom: 10px; }
+  .todayHead h2 { font-size: 13px; font-weight: 650; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink-2); }
+  .todayHead .meta { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .tl { list-style: none; font-variant-numeric: tabular-nums; }
+  .tl li { display: flex; gap: 10px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--grid); font-size: 13px; }
+  .tl li:last-child { border-bottom: none; }
+  .tl .tlTime { flex: none; width: 62px; color: var(--muted); font-size: 12px; }
+  .tl .tlBot { flex: none; width: 150px; color: var(--ink-2); font-size: 12px; }
+  .tl .tlWhat { flex: 1 1 auto; overflow-wrap: anywhere; }
+  .tl .tlPnl { flex: none; font-weight: 650; text-align: right; min-width: 76px; }
+  .tl .sym { font-weight: 650; }
+  .tlEmpty { color: var(--muted); font-size: 13px; padding: 6px 0; }
+
+  details.diag { margin-top: 10px; }
+  details.diag > summary { font-size: 11px; color: var(--muted); cursor: pointer; list-style: revert; }
+  details.diag[open] > summary { margin-bottom: 8px; }
+
+  @media (max-width: 620px) {
+    body { padding: 14px; }
+    .heroStat .value { font-size: 22px; }
+    .tl .tlBot { display: none; }
+    .tl .tlTime { width: 52px; }
+  }
+
   .chartsSection { margin-bottom: 16px; }
   .chartsSection h2 { font-size: 13px; font-weight: 650; color: var(--ink-2); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px; }
   .chartGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
@@ -81,9 +130,13 @@
 <body>
 <header>
   <h1>Multi-Strategy Portfolio</h1>
-  <a class="navlink" href="/orb15">ORB-15 detail view (equity chart, watchdog, scheduled tasks) →</a>
+  <a class="navlink" href="/">← ORB-15 operator console</a>
   <span class="updated" id="updated"></span>
 </header>
+
+<!-- The answer to "did I make any moves today?" lives here, above everything else. -->
+<section class="hero" id="hero"></section>
+<section class="today" id="todaySection"></section>
 
 <section class="chartsSection" id="chartsSection" style="display:none">
   <h2>Live price — stocks the bots are currently holding</h2>
@@ -164,6 +217,86 @@ $('cards').addEventListener('click', (e) => {
   closePosition(btn.dataset.strategy, btn.dataset.symbol, btn.dataset.legs.split(','), btn);
 });
 
+const SESSION_DOT = { open: 'var(--good)', premarket: 'var(--series-1)', afterhours: 'var(--series-1)', weekend: 'var(--muted)', holiday: 'var(--muted)', closed: 'var(--muted)' };
+// fmtUsd already renders negatives as "-$12.34"; this only ever ADDS a leading + for
+// non-negatives. Do not strip the minus - an earlier version did, which made a -$96 losing
+// session render as "$96.00" and read as a gain.
+const signed = (v) => (v >= 0 ? '+' : '') + fmtUsd(v);
+const plClass = (v) => (v > 0 ? 'delta-up' : v < 0 ? 'delta-down' : '');
+const hhmm = (ts) => new Date(ts).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' });
+
+// The hero answers the daily question before any per-bot detail. Market state and system
+// health are rendered as SEPARATE things on purpose: a quiet weekend and a dead runner
+// must never look alike, so "no trades" is only reassuring when health is clean.
+function renderHero(o, generatedAt) {
+  if (!o) return;
+  const ageSec = Math.max(0, Math.round((Date.now() - new Date(generatedAt).getTime()) / 1000));
+  const stale = ageSec > 90;
+
+  const chips = [
+    `<span class="hchip"><span class="dot" style="background:${SESSION_DOT[o.session.state] || 'var(--muted)'}"></span>${o.session.label}</span>`,
+    `<span class="hchip"><span class="dot" style="background:${o.health === 'ok' ? 'var(--good)' : o.health === 'critical' ? 'var(--critical)' : 'var(--warning)'}"></span>${
+      o.health === 'ok' ? `All ${o.accountsTotal} bots healthy` : o.health === 'critical' ? 'Bot down' : 'Needs attention'}</span>`,
+    `<span class="hchip"><span class="dot" style="background:${stale ? 'var(--warning)' : 'var(--good)'}"></span>Data ${ageSec}s old</span>`,
+  ];
+  if (o.session.nextOpen) chips.push(`<span class="hchip">Next open ${o.session.nextOpen}</span>`);
+
+  const problems = (o.problems || []).map((p) =>
+    `<div class="problem"><span class="badge ${p.level}">${p.level}</span><span><b>${p.bot}</b> — ${p.message}</span></div>`).join('');
+
+  // On a non-trading day today's change is structurally $0, so showing it as the headline
+  // would imply "flat" when the truth is "no session". Show the last session that traded.
+  const pnlLabel = o.session.isTradingDay ? "Today's P&L" : 'Today (no session)';
+  const movesSub = o.timeline.isFallback
+    ? `last session ${o.timeline.date} · ${o.timeline.fills} fills · ${signed(o.timeline.sessionRealized)} realized`
+    : `${o.openPositions} position${o.openPositions === 1 ? '' : 's'} open`;
+
+  $('hero').className = 'hero tone-' + (o.tone || 'idle');
+  $('hero').innerHTML =
+    `<div class="heroTop"><div class="heroVerdict">${o.verdict}</div></div>` +
+    '<div class="heroStats">' +
+      `<div class="heroStat"><div class="label">Portfolio</div><div class="value">${fmtUsd(o.equity)}</div><div class="sub">${o.accountsReporting}/${o.accountsTotal} accounts reporting</div></div>` +
+      `<div class="heroStat"><div class="label">${pnlLabel}</div><div class="value ${plClass(o.todayPnl)}">${signed(o.todayPnl)}</div><div class="sub">${o.todayPnlPct >= 0 ? '+' : ''}${o.todayPnlPct.toFixed(2)}% vs prior close</div></div>` +
+      `<div class="heroStat"><div class="label">Moves today</div><div class="value">${o.movesToday}</div><div class="sub">${movesSub}</div></div>` +
+      `<div class="heroStat"><div class="label">Unrealized</div><div class="value ${plClass(o.unrealized)}">${signed(o.unrealized)}</div><div class="sub">on open positions</div></div>` +
+    '</div>' +
+    `<div class="healthRow">${chips.join('')}</div>` + problems;
+}
+
+// One chronological column of every real move across all four bots. Ratchets, ticks and
+// no-signal chatter are filtered out server-side - they belong in per-bot diagnostics.
+function renderToday(o) {
+  if (!o) return;
+  const t = o.timeline;
+  const title = t.isFallback ? `Last session with activity — ${t.date}` : `Today's moves — ${t.date}`;
+  const rows = t.events.length ? t.events.map((e) => {
+    const what = FRIENDLY[e.event] || e.event.toLowerCase().replace(/_/g, ' ');
+    const sym = e.symbol ? `<span class="sym">${e.symbol}</span> ` : '';
+    const qty = e.qty ? ` ×${e.qty}` : '';
+    const why = e.reason ? ` <span style="color:var(--muted)">(${e.reason.replace(/_/g, ' ')})</span>` : '';
+    const pnl = typeof e.pnl === 'number' ? `<span class="tlPnl ${plClass(e.pnl)}">${signed(e.pnl)}</span>` : '<span class="tlPnl"></span>';
+    return `<li><span class="tlTime">${hhmm(e.ts)}</span><span class="tlBot">${e.bot}</span><span class="tlWhat">${sym}${what}${qty}${why}</span>${pnl}</li>`;
+  }).join('') : '';
+
+  $('todaySection').innerHTML =
+    `<div class="todayHead"><h2>${title}</h2>` +
+    (t.events.length ? `<span class="meta">${t.fills} fills · ${signed(t.sessionRealized)} realized</span>` : '') +
+    '</div>' +
+    (rows ? `<ul class="tl">${rows}</ul>`
+          : '<div class="tlEmpty">No orders, fills or closes recorded. Nothing has traded.</div>');
+}
+
+// Liveness for the continuous runners. `alive` is absent for overnight-drift, which is two
+// scheduled scripts rather than a polling process — that bot's health is the staleness
+// banner instead, so it gets no pill rather than a misleading "DOWN".
+function livePill(s) {
+  if (typeof s.alive !== 'boolean') return '';
+  const age = s.heartbeatAgeSec == null ? '?' : s.heartbeatAgeSec + 's';
+  return s.alive
+    ? ' <span class="pill"><span class="dot" style="background:var(--good,#3fb950)"></span>LIVE</span>'
+    : ' <span class="pill" title="last heartbeat ' + age + ' ago"><span class="dot" style="background:var(--critical)"></span>RUNNER DOWN</span>';
+}
+
 function renderCard(s) {
   const paused = s.guardrails && s.guardrails.pausedForReview;
   const missedWindow = s.missedEntryWindow && s.missedEntryWindow.missed;
@@ -198,11 +331,21 @@ function renderCard(s) {
 
   return (
     '<div class="card">' +
-    '<h2>' + s.name + (paused ? ' <span class="pill"><span class="dot" style="background:var(--critical)"></span>PAUSED</span>' : '') +
+    '<h2>' + s.name + livePill(s) + (paused ? ' <span class="pill"><span class="dot" style="background:var(--critical)"></span>PAUSED</span>' : '') +
     (missedWindow ? ' <span class="pill"><span class="dot" style="background:var(--warning)"></span>MISSED ENTRY WINDOW</span>' : '') + '</h2>' +
     (missedWindow ? '<div class="note" style="color:var(--critical)">⚠ ' + s.missedEntryWindow.reason + '</div>' : '') +
     (s.extra && s.extra.strategyNote ? '<div class="note">' + s.extra.strategyNote + '</div>' : '') +
     (s.extra && s.extra.todaysProposal ? '<div class="note"><b>Today:</b> ' + s.extra.todaysProposal + '</div>' : '') +
+    // Per-bot answer to the same daily question, using the SAME timeline the header does,
+    // so a card can never contradict the hero above it.
+    (s.today ? '<div class="note" style="color:var(--ink-2);margin-bottom:12px">' +
+        (s.today.fills > 0
+          ? '<b>' + (s.today.isFallback ? s.today.date : 'Today') + ':</b> ' + s.today.fills + ' fill' + (s.today.fills === 1 ? '' : 's') +
+            ' · ' + signed(s.today.realized) + ' realized' +
+            (s.today.lastActivityTs ? ' · last ' + hhmm(s.today.lastActivityTs) + ' ET' : '')
+          : '<b>Today:</b> no moves') +
+        (s.today.pnl != null ? ' · account ' + signed(s.today.pnl) + ' vs prior close' : '') +
+      '</div>' : '') +
     '<div class="tiles">' +
     '<div class="tile"><div class="label">Equity</div><div class="value">' + (equity != null ? fmtUsd(equity) : '—') + '</div></div>' +
     '<div class="tile"><div class="label">Unrealized</div><div class="value ' + (s.unrealizedPl >= 0 ? 'delta-up' : 'delta-down') + '">' + fmtUsd(s.unrealizedPl || 0) + '</div></div>' +
@@ -211,8 +354,13 @@ function renderCard(s) {
     '</div>' +
     '<table><thead><tr><th>Position</th><th class="num">Qty</th><th class="num">P&amp;L</th><th></th></tr></thead><tbody>' + posRows + '</tbody></table>' +
     (posRows ? '' : '<div class="empty">No open positions</div>') +
+    // Raw log demoted behind a disclosure. Real moves now live in the timeline at the top;
+    // what remains here is diagnostic chatter (ratchets, ticks, no-signal passes) that was
+    // drowning the signal when it sat inline.
+    '<details class="diag"><summary>Diagnostics — raw event log</summary>' +
     '<ul class="feed">' + feedItems + '</ul>' +
     (feedItems ? '' : '<div class="empty">No recent activity</div>') +
+    '</details>' +
     '</div>'
   );
 }
@@ -264,11 +412,18 @@ async function refresh() {
     const res = await fetch('/api/multi-status');
     const s = await res.json();
     if (s.error) throw new Error(s.error);
+    renderHero(s.overview, s.generatedAt);
+    renderToday(s.overview);
     $('cards').innerHTML = s.strategies.map(renderCard).join('');
     renderPriceCharts(s.priceCharts, s.dataQualityChecks);
     lastFetch = Date.now();
   } catch (e) {
-    $('cards').innerHTML = '<div class="card">dashboard error: ' + e.message + '</div>';
+    // A failed fetch must not leave a stale, confidently-wrong hero on screen - the whole
+    // point of this page is that you can trust what it says about today.
+    $('hero').className = 'hero tone-critical';
+    $('hero').innerHTML = '<div class="heroTop"><div class="heroVerdict">Dashboard cannot reach the status server — the figures below may be stale.</div></div>' +
+      '<div class="healthRow"><span class="hchip"><span class="dot" style="background:var(--critical)"></span>' + e.message + '</span></div>';
+    $('todaySection').innerHTML = '';
   }
 }
 

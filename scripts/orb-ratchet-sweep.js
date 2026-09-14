@@ -23,8 +23,14 @@ const CUTOFF = '11:30';
 const FLATTEN = '15:45';
 const ZERO_DTE_SYMBOLS = new Set(['SPY', 'QQQ']);
 
-const STEP_GRID = [0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50];
-const TRAIL_GRID = [0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50];
+// !! 2026-08-15: the LIVE bot runs step=0.02, which the original grid below never contained -
+// its smallest step was 0.10, five times larger. The 2026-08-04 "retune from backtest" commit
+// therefore deployed a value outside the grid that was supposed to validate it. The small
+// steps are included now so the deployed setting is actually measured rather than assumed.
+// Override with ORB_STEP_GRID / ORB_TRAIL_GRID (comma-separated decimals) to re-scope.
+const parseGrid = (env, fallback) => (env ? env.split(',').map(Number).filter((n) => n > 0) : fallback);
+const STEP_GRID = parseGrid(process.env.ORB_STEP_GRID, [0.02, 0.03, 0.05, 0.075, 0.10, 0.15, 0.20, 0.30, 0.50]);
+const TRAIL_GRID = parseGrid(process.env.ORB_TRAIL_GRID, [0.10, 0.15, 0.20, 0.30, 0.50]);
 
 async function getHistoricalBars(symbol, days) {
   const start = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();

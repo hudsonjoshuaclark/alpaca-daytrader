@@ -122,12 +122,24 @@ async function manageOpenTrades(state, positionsBySymbol) {
     if (trade.status !== 'open') continue;
     const pos = positionsBySymbol.get(trade.symbol);
     if (!pos) {
-      rm.removeTrade(state, trade.orderId);
-      log('TRADE_GONE', { symbol: trade.symbol, message: 'no position found in account' });
+      // Closed outside the bot (dashboard Close button, Alpaca UI). removeTrade() alone
+      // drops the P&L on the floor, which quietly disables this bot's DAILY_LOSS_STOP_PCT
+      // circuit breaker - see the long note in ../../runner.js. Record the last observed
+      // unrealised P&L instead: at most one 60s tick stale.
+      const estimated = typeof trade.lastSeenPl === 'number' ? trade.lastSeenPl : 0;
+      rm.recordExit(state, trade.orderId, estimated);
+      log('TRADE_GONE', {
+        symbol: trade.symbol, message: 'no position found in account - closed outside the bot',
+        pnl: estimated, pnlIsEstimate: true,
+      });
       continue;
     }
     const plpc = parseFloat(pos.unrealized_plpc);
     const pnl = parseFloat(pos.unrealized_pl);
+    if (trade.lastSeenPl !== pnl) {
+      trade.lastSeenPl = pnl;
+      rm.saveState(state);
+    }
 
     if (!cfg.RATCHET_ENABLED) {
       // Original validated behaviour: fixed stop, and the target closes the trade.
@@ -223,10 +235,19 @@ async function tick() {
   writeHeartbeat();
   if (!isMarketHours()) return;
 
-  const account = await orders.getAccount();
-  const portfolioValue = parseFloat(account.equity);
+  // Letting /v2/account throw aborted the ENTIRE tick - stop/target checks and the 15:45
+  // flatten included. This bot lost 16 consecutive minutes of position management to that
+  // on 2026-08-13 (every tick 12:56-13:11 ET timed out on this one call). Equity is only
+  // needed to size a new entry, so degrade: manage and flatten what's open, skip entries.
+  let portfolioValue = null;
+  try {
+    const equity = parseFloat((await orders.getAccount()).equity);
+    if (Number.isFinite(equity)) portfolioValue = equity;
+  } catch (e) {
+    log('ACCOUNT_UNAVAILABLE', { message: e.message, effect: 'managing open trades only, no new entries this tick' });
+  }
   const state = rm.loadState();
-  if (state.startEquity === null) {
+  if (state.startEquity === null && portfolioValue !== null) {
     state.startEquity = portfolioValue;
     rm.saveState(state);
   }
@@ -250,17 +271,34 @@ async function tick() {
   await manageOpenTrades(state, positionsBySymbol);
 
   const t = rm.nowET();
-  if (t >= cfg.ENTRY_WINDOW_START && t < cfg.ENTRY_WINDOW_END) {
+  if (portfolioValue !== null && t >= cfg.ENTRY_WINDOW_START && t < cfg.ENTRY_WINDOW_END) {
     await scanForSignals(state, portfolioValue);
   }
 }
 
 async function main() {
   log('START', { dryRun: DRY_RUN, strategy: 'SwingSignalsRSI', watchlistSize: watchlist.length });
-  await tick().catch((e) => log('ERROR', { message: e.message }));
-  setInterval(() => {
-    tick().catch((e) => log('ERROR', { message: e.message }));
-  }, POLL_MS);
+  // setInterval fires on a fixed clock regardless of whether the previous tick finished.
+  // This runner scans a 56-name watchlist, so a broker slowdown makes an overrun the most
+  // likely of the three bots — and a position is only recorded in state AFTER its order is
+  // placed, so overlapping ticks could double-enter. Skip instead of stacking.
+  let tickInFlight = false;
+  const runTick = async () => {
+    if (tickInFlight) {
+      log('TICK_SKIPPED', { reason: 'previous tick still running' });
+      return;
+    }
+    tickInFlight = true;
+    try {
+      await tick();
+    } catch (e) {
+      log('ERROR', { message: e.message });
+    } finally {
+      tickInFlight = false;
+    }
+  };
+  await runTick();
+  setInterval(runTick, POLL_MS);
 }
 
 main();

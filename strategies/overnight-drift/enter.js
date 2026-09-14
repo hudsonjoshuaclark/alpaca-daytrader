@@ -112,7 +112,67 @@ async function main() {
 
   state.lastEnterDate = todayET();
   rm.saveState(state);
+
+  await settlePendingOrders(state);
   log('ENTER_DONE', { date: todayET(), openPositions: state.openPositions.length });
+}
+
+// This script used to place its orders and exit immediately, leaving every order recorded
+// as an open position with status 'pending' until the next morning's exit.js reconciled it.
+// The orders are `day` limits placed at 15:55 ET, so they resolve one way or the other by
+// the 16:00 close - and they frequently expire unfilled (3 of the 7 placed between
+// 2026-08-03 and 2026-08-13). In between, state.json overstated the book: on 2026-08-13 it
+// recorded 3 open positions when only COIN and PLTR ever filled. That is not cosmetic -
+// canEnterNewTrade() counts openPositions against MAX_CONCURRENT_POSITIONS, so a phantom
+// position silently consumes a slot the next session, and the dashboard reports it as real.
+//
+// Waiting through the close costs a few idle minutes in a scheduled task and resolves every
+// order definitively. Read-only polling: nothing is cancelled or re-priced here.
+async function settlePendingOrders(state) {
+  if (DRY_RUN) return;
+  const DEADLINE = Date.now() + 8 * 60 * 1000; // hard stop well past the 16:00 expiry
+  const POLL_MS = 20 * 1000;
+
+  while (Date.now() < DEADLINE) {
+    const pending = state.openPositions.filter((p) => p.status === 'pending');
+    if (pending.length === 0) return;
+
+    for (const trade of pending) {
+      let order;
+      try {
+        order = await orders.getOrder(trade.orderId);
+      } catch (e) {
+        log('ERROR', { message: `order lookup ${trade.orderId}: ${e.message}` });
+        continue;
+      }
+      if (order.status === 'filled') {
+        trade.status = 'open';
+        // Same field exit.js overwrites on its own reconcile pass, so the two paths leave
+        // state in an identical shape whichever one resolves the order first.
+        const limitPrice = trade.entryDebit;
+        trade.entryDebit = parseFloat(order.filled_avg_price) || trade.entryDebit;
+        rm.saveState(state);
+        log('ENTRY', {
+          symbol: trade.underlying, kind: trade.kind, qty: trade.qty,
+          premium: trade.entryDebit, limitPrice,
+        });
+      } else if (['canceled', 'expired', 'rejected', 'done_for_day'].includes(order.status)) {
+        rm.removeTrade(state, trade.orderId);
+        log('ENTRY_UNFILLED', { symbol: trade.underlying, orderId: trade.orderId, status: order.status });
+      }
+    }
+
+    if (state.openPositions.some((p) => p.status === 'pending')) {
+      await new Promise((r) => setTimeout(r, POLL_MS));
+    }
+  }
+
+  const stuck = state.openPositions.filter((p) => p.status === 'pending');
+  if (stuck.length) {
+    // Left in state deliberately rather than guessed at - exit.js reconciles pending orders
+    // too, so an unresolved one is picked up next session instead of being dropped here.
+    log('PENDING_UNRESOLVED', { count: stuck.length, symbols: stuck.map((p) => p.underlying) });
+  }
 }
 
 main().catch((e) => { log('ERROR', { message: e.message }); process.exit(1); });

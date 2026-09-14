@@ -13,7 +13,11 @@ const rm = require('./lib/riskManager');
 const md = require('./lib/marketData');
 const ovOrders = require('./strategies/overnight-drift/orders');
 const csOrders = require('./strategies/credit-spread/orders');
-const swOrders = require('./strategies/swing-signals/orders');
+const csCfg = require('./strategies/credit-spread/config');
+const omOrders = require('./strategies/overnight-momentum/orders');
+const omCfg = require('./strategies/overnight-momentum/config');
+const health = require('./lib/healthChecks');
+const { parseOcc, buildPositionGroups } = require('./lib/positions');
 const yahoo = require('./lib/yahooFinance');
 const finnhub = require('./lib/finnhub');
 
@@ -23,8 +27,8 @@ const OV_DIR = path.join(__dirname, 'strategies', 'overnight-drift');
 const OV_LOGS = path.join(OV_DIR, 'logs');
 const CS_DIR = path.join(__dirname, 'strategies', 'credit-spread');
 const CS_LOGS = path.join(CS_DIR, 'logs');
-const SW_DIR = path.join(__dirname, 'strategies', 'swing-signals');
-const SW_LOGS = path.join(SW_DIR, 'logs');
+const OM_DIR = path.join(__dirname, 'strategies', 'overnight-momentum');
+const OM_LOGS = path.join(OM_DIR, 'logs');
 
 // Dashboard is tunneled to a public URL, so it needs auth. Required once DASHBOARD_USER/
 // DASHBOARD_PASS are set in .env; if unset, falls back to localhost-only (no auth) so the
@@ -114,10 +118,10 @@ const STRATEGIES = {
       }));
     },
   },
-  'swing': {
-    name: 'Swing Signals (RSI)',
-    orders: swOrders,
-    logs: SW_LOGS,
+  'overnight-momentum': {
+    name: 'Overnight Momentum',
+    orders: omOrders,
+    logs: OM_LOGS,
     trades: () => [], // plain stock shares, never multi-leg
   },
 };
@@ -160,30 +164,144 @@ function todayET() {
 // Finds today's FIRST 'START' event (the runner logs one every time it (re)launches) and
 // flags it if that first start happened at/after the entry cutoff, or hasn't happened at
 // all yet on a weekday past the cutoff.
-function checkMissedEntryWindow() {
+// Generalised over the three continuous runners. It was ORB-15-only, which meant the
+// 2026-08-12 outage (Modern Standby swallowed the whole session - none of the four bots
+// ran, no START event in any log) was visible on exactly one of four dashboard cards.
+// Each bot passes its own log and its own entry cutoff.
+function checkMissedEntryWindow(logFile, entryCutoff, label = 'Runner') {
   const today = todayET();
   const day = new Date().toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short' });
   if (day === 'Sat' || day === 'Sun') return null;
 
-  const startTimes = tailLines(path.join(LOGS, 'trade-log.jsonl'), 500)
+  const startTimes = tailLines(logFile, 500)
     .map((l) => { try { return JSON.parse(l); } catch { return null; } })
     .filter((e) => e && e.event === 'START' && e.ts
       && new Date(e.ts).toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) === today);
   const nowET = rm.nowET();
 
   if (startTimes.length === 0) {
-    if (nowET >= cfg.ORB_ENTRY_CUTOFF) {
-      return { missed: true, reason: `No runner start logged yet today, and it's already past the ${cfg.ORB_ENTRY_CUTOFF} ET entry cutoff — check whether the machine was asleep.` };
+    if (nowET >= entryCutoff) {
+      return { missed: true, reason: `${label}: no start logged yet today, and it's already past the ${entryCutoff} ET entry cutoff — check whether the machine was asleep.` };
     }
     return null;
   }
 
   const firstStart = startTimes[0];
   const firstStartTimeET = new Date(firstStart.ts).toLocaleTimeString('en-GB', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit' });
-  if (firstStartTimeET >= cfg.ORB_ENTRY_CUTOFF) {
-    return { missed: true, reason: `Runner's first start today was ${firstStartTimeET} ET, after the ${cfg.ORB_ENTRY_CUTOFF} ET entry cutoff — likely missed the whole entry window (e.g. the machine was asleep).` };
+  if (firstStartTimeET >= entryCutoff) {
+    return { missed: true, reason: `${label}: first start today was ${firstStartTimeET} ET, after the ${entryCutoff} ET entry cutoff — likely missed the whole entry window (e.g. the machine was asleep).` };
   }
   return null;
+}
+
+// Pure predicates live in lib/healthChecks.js so they are testable without starting this
+// server; this wrapper supplies the clock.
+function checkOvernightStale(state) {
+  return health.checkOvernightStale(state, {
+    nowET: rm.nowET(),
+    today: todayET(),
+    weekday: new Date().toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short' }),
+    prevDay: health.prevWeekdayET(),
+  });
+}
+
+// Shared liveness read for any bot that writes logs/heartbeat.json. Same 120s threshold
+// buildStatus already uses for ORB-15: every continuous runner heartbeats on each tick,
+// off-hours included, so a stale file means the process is gone, not that it is quiet.
+function heartbeatHealth(logsDir) {
+  const heartbeat = readJson(path.join(logsDir, 'heartbeat.json'));
+  const heartbeatAgeSec = heartbeat ? Math.round((Date.now() - new Date(heartbeat.ts).getTime()) / 1000) : null;
+  return { alive: heartbeatAgeSec !== null && heartbeatAgeSec < 120, heartbeatAgeSec };
+}
+
+// ---------------------------------------------------------------------------------------
+// Overview: the "did anything happen today, and am I up or down" layer.
+//
+// Built around one rule learned the hard way: a quiet market and a dead bot must never look
+// alike. Those are two independent axes and they are reported separately -
+//   marketSession()  - is a session even running right now?
+//   health rollup    - are the processes that would act actually alive?
+// so "no trades" can be rendered as reassuring or alarming based on which axis is at fault,
+// rather than the reader having to infer it.
+
+const US_HOLIDAYS_2026 = new Set([
+  '2026-01-01', '2026-01-19', '2026-02-16', '2026-04-03', '2026-05-25',
+  '2026-06-19', '2026-07-03', '2026-09-07', '2026-11-26', '2026-12-25',
+]);
+
+// All times America/New_York, DST included, because that is what the bots trade on.
+function marketSession(now = new Date()) {
+  const weekday = now.toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short' });
+  const date = todayET();
+  const t = rm.nowET();
+  const isWeekend = weekday === 'Sat' || weekday === 'Sun';
+  const isHoliday = US_HOLIDAYS_2026.has(date);
+
+  let state, label;
+  if (isWeekend) { state = 'weekend'; label = 'Weekend — markets closed'; }
+  else if (isHoliday) { state = 'holiday'; label = 'Market holiday — markets closed'; }
+  else if (t < '04:00') { state = 'closed'; label = 'Overnight — markets closed'; }
+  else if (t < '09:30') { state = 'premarket'; label = `Pre-market — opens 09:30 ET`; }
+  else if (t < '16:00') { state = 'open'; label = 'Market open'; }
+  else if (t < '20:00') { state = 'afterhours'; label = 'After hours — regular session closed'; }
+  else { state = 'closed'; label = 'Overnight — markets closed'; }
+
+  // Next regular open, skipping weekends and holidays.
+  const next = new Date(now.getTime());
+  if (state === 'open' || state === 'premarket') {
+    // today
+  } else {
+    do { next.setDate(next.getDate() + 1); }
+    while (['Sat', 'Sun'].includes(next.toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short' }))
+      || US_HOLIDAYS_2026.has(next.toLocaleDateString('en-CA', { timeZone: 'America/New_York' })));
+  }
+  const nextDay = next.toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long', month: 'short', day: 'numeric' });
+  return {
+    state,
+    label,
+    isTradingSession: state === 'open',
+    // "today counts" only mean something on a day the market actually runs
+    isTradingDay: !isWeekend && !isHoliday,
+    nextOpen: (state === 'open') ? null : `${nextDay} 09:30 ET`,
+  };
+}
+
+// Events that represent an actual MOVE - an order placed, filled, or closed. Deliberately
+// excludes RATCHET / TICK_SKIPPED / NO_SIGNAL / NO_STRUCTURE / NO_DATA / START / DAY_END /
+// heartbeat-ish chatter, which is what made the old feed unreadable. Those stay available
+// in each bot's diagnostics feed.
+const MOVE_EVENTS = new Set([
+  'ENTRY_ORDER', 'ENTRY', 'EXIT', 'ENTRY_UNFILLED', 'ENTRY_CANCEL_STALE',
+  'TRADE_GONE', 'FORCE_FLATTEN', 'LATE_EXIT',
+]);
+
+function etDateOf(ts) {
+  return new Date(ts).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+}
+
+// Every move a bot made on a given ET date, newest last.
+function movesOn(logFile, dateET, botName) {
+  return tailLines(logFile, 800)
+    .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+    .filter((e) => e && e.ts && MOVE_EVENTS.has(e.event) && etDateOf(e.ts) === dateET)
+    .map((e) => ({
+      bot: botName,
+      ts: e.ts,
+      event: e.event,
+      symbol: e.underlying || e.symbol || null,
+      qty: e.qty ?? null,
+      pnl: typeof e.pnl === 'number' ? e.pnl : null,
+      reason: e.reason || null,
+    }));
+}
+
+// The most recent ET date on which this log recorded any move at all.
+function lastSessionWithMoves(logFile) {
+  const dates = tailLines(logFile, 800)
+    .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+    .filter((e) => e && e.ts && MOVE_EVENTS.has(e.event))
+    .map((e) => etDateOf(e.ts));
+  return dates.length ? dates[dates.length - 1] : null;
 }
 
 function getRecentEvents(n = 40) {
@@ -209,6 +327,43 @@ function getScheduledTasks() {
       } catch { resolve(taskCache.data); }
     });
   });
+}
+
+// Did the intraday flatten actually run today?
+//
+// This is the failure that matters. On 2026-08-14 the machine entered Modern Standby at
+// 15:27 and every runner froze through the 15:45 flatten; nothing surfaced it and it was
+// found days later by reading logs. A stranded 0DTE credit spread goes to expiry, which is
+// precisely what FORCE_CLOSE_AT exists to prevent.
+//
+// Deliberately checked against the bot's OWN DAY_END event rather than Windows power events.
+// An earlier version of this used Kernel-Power 506/507 and was badly wrong: under Modern
+// Standby those fire constantly (31 times in 4 days here) and mean "entered low-power idle",
+// NOT "stopped" - background work continues. Naive pairing produced a claim that the box
+// slept for 2424 minutes on a day the bots demonstrably traded all afternoon. DAY_END is
+// written by the flatten path itself, so its absence is direct evidence, not inference.
+function checkMissedFlatten(logFile, flattenAt, label) {
+  const today = todayET();
+  const ranToday = tailLines(logFile, 400)
+    .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+    .some((e) => e && e.event === 'DAY_END' && e.ts && etDateOf(e.ts) === today);
+
+  // Decision lives in lib/healthChecks.js so it is unit-testable in both directions.
+  const flag = health.shouldFlagMissedFlatten({
+    weekday: new Date().toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short' }),
+    today,
+    nowET: rm.nowET(),
+    flattenAt,
+    isHoliday: US_HOLIDAYS_2026.has(today),
+    ranToday,
+  });
+  if (!flag) return null;
+
+  return {
+    level: 'warning',
+    bot: label,
+    message: `no DAY_END logged today — the ${flattenAt} ET flatten does not appear to have run. Any position left open is still open. Check whether this machine was asleep.`,
+  };
 }
 
 function getLatestReview() {
@@ -280,7 +435,12 @@ async function buildOvernightStatus() {
 
   return {
     name: 'Overnight Drift',
-    account: account ? { equity: parseFloat(account.equity), cash: parseFloat(account.cash), status: account.status } : null,
+    missedEntryWindow: checkOvernightStale(state),
+    // lastEquity is Alpaca's own prior-trading-day close equity. It is the only baseline
+    // that makes "today" honest for these bots: three of the four can hold positions
+    // overnight, so realized-only P&L understates the day. equity - lastEquity is
+    // mark-to-market and needs no bookkeeping of our own.
+    account: account ? { equity: parseFloat(account.equity), lastEquity: parseFloat(account.last_equity), cash: parseFloat(account.cash), status: account.status } : null,
     unrealizedPl: unrealized,
     positions: positions.map((p) => ({
       symbol: p.symbol, qty: p.qty, avgEntryPrice: p.avg_entry_price,
@@ -315,7 +475,16 @@ async function buildCreditSpreadStatus() {
 
   return {
     name: 'Credit Spread (0DTE)',
-    account: account ? { equity: parseFloat(account.equity), cash: parseFloat(account.cash), status: account.status } : null,
+    // These two runners write heartbeat.json exactly like ORB-15 does, but the dashboard
+    // never read them - so two of the three continuous bots showed no liveness at all and
+    // a dead runner would have looked identical to an idle one.
+    ...heartbeatHealth(CS_LOGS),
+    missedEntryWindow: checkMissedEntryWindow(path.join(CS_LOGS, 'trade-log.jsonl'), csCfg.ENTRY_WINDOW_END, 'Credit Spread'),
+    // lastEquity is Alpaca's own prior-trading-day close equity. It is the only baseline
+    // that makes "today" honest for these bots: three of the four can hold positions
+    // overnight, so realized-only P&L understates the day. equity - lastEquity is
+    // mark-to-market and needs no bookkeeping of our own.
+    account: account ? { equity: parseFloat(account.equity), lastEquity: parseFloat(account.last_equity), cash: parseFloat(account.cash), status: account.status } : null,
     unrealizedPl: unrealized,
     positions: positions.map((p) => ({
       symbol: p.symbol, qty: p.qty, avgEntryPrice: p.avg_entry_price,
@@ -328,27 +497,35 @@ async function buildCreditSpreadStatus() {
       realizedPnL: state ? state.realizedPnL : 0,
       trades: state ? state.trades : 0,
       tradedSymbols: state ? state.tradedSymbols : [],
-      strategyNote: 'Sells 0DTE put credit spreads on SPY/QQQ (short ~1% OTM, $3-wide protective long). Validated 2026-07-31 over 180 real days (n=247): 71.7% win rate, +168.01bp expectancy - but the most recent month tested was a real LOSING month (-159.29bp), so a high win rate does not mean no drawdowns. Replaces the retired Trader Mimicry bot on this same account. See strategies/credit-spread/config.js.',
+      strategyNote: 'Sells 0DTE put credit spreads on SPY/QQQ (short ~1% OTM, $3-wide protective long). Validated 2026-07-31 over 180 real days (n=247): 71.7% win rate, +168.01bp expectancy - but the most recent month tested was a real LOSING month (-159.29bp), so a high win rate does not mean no drawdowns. Replaces the retired Trader Mimicry bot on this same account. See strategies/credit-spread/config.js. NOTE: from launch until 2026-08-13 this bot never actually held a spread — a sign error on Alpaca\'s mleg fill price inverted the exit tests, so all 3 trades it placed (08-06, 08-11, 08-13) closed on a false "profit_target" within 0.4s of filling, each for the bid-ask spread. Fixed 2026-08-13; results before that date measure the bug, not the strategy. ON PROBATION: reviewed after 20 completed trades or 2026-09-15, whichever is first — retired if win rate < 55% or realized P&L is negative. Expect materially less than +168bp: the backtest models exits at bar close with no bid/ask cost, while live round-trip slippage measured ~9–15% of credit collected (~70bp of drag).',
     },
   };
 }
 
-async function buildSwingSignalsStatus() {
+async function buildOvernightMomentumStatus() {
   const [account, positions] = await Promise.all([
-    swOrders.getAccount().catch(() => null),
-    swOrders.getAllPositions().catch(() => []),
+    omOrders.getAccount().catch(() => null),
+    omOrders.getAllPositions().catch(() => []),
   ]);
-  const stateFile = readJson(path.join(SW_LOGS, 'daily-state.json'));
-  const state = stateFile && stateFile.date === todayET() ? stateFile : null;
-  const guardrails = readJson(path.join(SW_LOGS, 'account-guardrails.json'));
-  const recentEvents = tailLines(path.join(SW_LOGS, 'trade-log.jsonl'), 40)
+  // state.json, NOT daily-state.json: this bot holds positions overnight, so its state is
+  // persistent rather than daily-reset (the structural difference from swing-signals, which
+  // it replaces). There is no "is it today's file?" check to make - the file is always live.
+  const state = readJson(path.join(OM_LOGS, 'state.json'));
+  const guardrails = readJson(path.join(OM_LOGS, 'account-guardrails.json'));
+  const recentEvents = tailLines(path.join(OM_LOGS, 'trade-log.jsonl'), 40)
     .reverse()
     .map((l) => { try { return JSON.parse(l); } catch { return { event: 'PARSE_ERROR', raw: l }; } });
   const unrealized = positions.reduce((a, p) => a + parseFloat(p.unrealized_pl || 0), 0);
 
   return {
-    name: 'Swing Signals (RSI)',
-    account: account ? { equity: parseFloat(account.equity), cash: parseFloat(account.cash), status: account.status } : null,
+    name: 'Overnight Momentum',
+    ...heartbeatHealth(OM_LOGS),
+    missedEntryWindow: checkMissedEntryWindow(path.join(OM_LOGS, 'trade-log.jsonl'), omCfg.ENTRY_WINDOW_END, 'Overnight Momentum'),
+    // lastEquity is Alpaca's own prior-trading-day close equity. It is the only baseline
+    // that makes "today" honest for these bots: three of the four can hold positions
+    // overnight, so realized-only P&L understates the day. equity - lastEquity is
+    // mark-to-market and needs no bookkeeping of our own.
+    account: account ? { equity: parseFloat(account.equity), lastEquity: parseFloat(account.last_equity), cash: parseFloat(account.cash), status: account.status } : null,
     unrealizedPl: unrealized,
     positions: positions.map((p) => ({
       symbol: p.symbol, qty: p.qty, avgEntryPrice: p.avg_entry_price,
@@ -360,8 +537,150 @@ async function buildSwingSignalsStatus() {
     extra: {
       realizedPnL: state ? state.realizedPnL : 0,
       trades: state ? state.trades : 0,
-      openPositions: state ? state.openTrades.length : 0,
-      strategyNote: 'Direct stock shares (not options): buys on an RSI(14) pullback-through-30 in an EMA(50) uptrend, across a 56-symbol watchlist. Validated 2026-08-02 over 365 real days (n=324, clears this project\'s 200-trade bar): 20.24bp/trade expectancy, 51.9% win rate, +65.58% summed return, 7/12 months positive. Deliberately uses a tighter 1.5% stop / 2.0% target instead of a higher-expectancy wide setting (46.48bp/trade) - the wide setting almost never actually triggered its stop/target (95% of trades just rode to the close), so this tighter setting was chosen because the stop-loss/take-profit genuinely drive most exits instead of sitting dormant. March 2026 was a real losing month, consistent with most other candidates/bots tested that month.',
+      openPositions: state ? (state.openPositions || []).length : 0,
+      lastEnterDate: state ? state.lastEnterDate : null,
+      lastExitDate: state ? state.lastExitDate : null,
+      // The headline number is deliberately paired with the caveat that most of it is not
+      // alpha. A dashboard that advertises +37.5% without saying "and +12.6bp of the 15.7bp
+      // is just the overnight risk premium" is the same mistake the old swing-signals note
+      // made when it advertised an n=324 sample the bot could never trade.
+      strategyNote: 'Buys SHARES of names up ≥1.0% on the day at 15:55 ET, sells at 09:35 ET next session. Long only. Replaced swing-signals 2026-08-14. Validated over 365 days on 46 names (scripts/strategy-overnight-shares-sweep.js): n=3311, +15.7bp/trade after 5bp costs, IS +9.6 / OOS +29.7bp, 9/13 months positive; compounded account sim at these exact settings $1000 → $1375 (+37.5%) with 5.6% max drawdown. Universe deliberately EXCLUDES the 12 names the Overnight Drift options bot trades, so the two never hold the same stock. ⚠ CAVEATS: most of this is not alpha — holding these names overnight unconditionally earned +12.6bp, so the up-1% filter adds only +7.2bp. It is long beta and has never been tested through a bear market (sample had SPY +21%, of which +18.8% accrued overnight). Real gap tail: worst trade -27.1%, and up to 5 positions are held on the same night. At $1,000 only 25 of the 46 names fit the $150 per-trade budget, which the backtest already models.',
+    },
+  };
+}
+
+// Portfolio-level answer to "did anything happen today, and am I up or down". Assembled
+// from the already-built per-bot statuses plus their logs, so it can never disagree with
+// the cards below it.
+function buildOverview(strategies) {
+  const logs = {
+    'orb15': path.join(LOGS, 'trade-log.jsonl'),
+    'overnight': path.join(OV_LOGS, 'trade-log.jsonl'),
+    'credit-spread': path.join(CS_LOGS, 'trade-log.jsonl'),
+    'overnight-momentum': path.join(OM_LOGS, 'trade-log.jsonl'),
+  };
+  const session = marketSession();
+  const today = todayET();
+
+  // --- money -------------------------------------------------------------------------
+  let equity = 0, lastEquity = 0, unrealized = 0, openPositions = 0, accountsReporting = 0;
+  for (const s of strategies) {
+    if (!s.account) continue;
+    accountsReporting += 1;
+    equity += s.account.equity || 0;
+    lastEquity += Number.isFinite(s.account.lastEquity) ? s.account.lastEquity : (s.account.equity || 0);
+    unrealized += s.unrealizedPl || 0;
+    openPositions += (s.positions || []).length;
+  }
+  const todayPnl = equity - lastEquity;
+
+  // --- moves -------------------------------------------------------------------------
+  let timeline = [];
+  for (const s of strategies) {
+    const f = logs[s.key];
+    if (f) timeline.push(...movesOn(f, today, s.name));
+  }
+  // If today produced nothing (weekend, holiday, or simply a quiet session), fall back to
+  // the most recent day that DID trade, so the page still answers "what happened last".
+  let timelineDate = today, isFallback = false;
+  if (timeline.length === 0) {
+    const candidates = strategies.map((s) => (logs[s.key] ? lastSessionWithMoves(logs[s.key]) : null)).filter(Boolean);
+    const prev = candidates.sort().pop();
+    if (prev) {
+      timelineDate = prev;
+      isFallback = true;
+      for (const s of strategies) {
+        const f = logs[s.key];
+        if (f) timeline.push(...movesOn(f, prev, s.name));
+      }
+    }
+  }
+  timeline.sort((a, b) => new Date(a.ts) - new Date(b.ts));
+  const fills = timeline.filter((e) => e.event === 'ENTRY' || e.event === 'EXIT');
+  const closes = timeline.filter((e) => e.event === 'EXIT' && typeof e.pnl === 'number');
+  const sessionRealized = closes.reduce((a, e) => a + e.pnl, 0);
+
+  // --- health: entirely separate from market activity ---------------------------------
+  // A bot with no heartbeat concept (scheduled scripts) is not "down" - it is judged by
+  // whether its scheduled runs actually happened, which is what missedEntryWindow carries.
+  const problems = [];
+  for (const s of strategies) {
+    if (typeof s.alive === 'boolean' && !s.alive) {
+      problems.push({ level: 'critical', bot: s.name, message: `runner is down (last heartbeat ${s.heartbeatAgeSec == null ? 'never' : s.heartbeatAgeSec + 's'} ago)` });
+    }
+    if (s.missedEntryWindow && s.missedEntryWindow.missed) {
+      problems.push({ level: 'warning', bot: s.name, message: s.missedEntryWindow.reason });
+    }
+    if (s.guardrails && s.guardrails.pausedForReview) {
+      problems.push({ level: 'warning', bot: s.name, message: `paused for review: ${s.guardrails.pausedReason || 'unknown'}` });
+    }
+    if (!s.account) {
+      problems.push({ level: 'warning', bot: s.name, message: 'broker account unreachable' });
+    }
+  }
+
+  // The dangerous machine-level failure is a missed 15:45 flatten - that is what strands a
+  // 0DTE credit spread into expiry, and it is what happened on 2026-08-14. Checked against
+  // the bots' own DAY_END events rather than inferred from OS power events, which under
+  // Modern Standby fire constantly without meaning anything stopped.
+  for (const [name, logFile, flattenAt] of [
+    ['ORB-15', path.join(LOGS, 'trade-log.jsonl'), cfg.FORCE_FLATTEN_AT],
+    ['Credit Spread (0DTE)', path.join(CS_LOGS, 'trade-log.jsonl'), csCfg.FORCE_CLOSE_AT],
+  ]) {
+    const miss = checkMissedFlatten(logFile, flattenAt, name);
+    if (miss) problems.push(miss);
+  }
+  const health = problems.some((p) => p.level === 'critical') ? 'critical'
+    : problems.length ? 'warning' : 'ok';
+
+  // --- the one-sentence verdict -------------------------------------------------------
+  // Deterministic. Reads the two axes in priority order: broken first, then market state,
+  // then actual activity. Never says "all good" purely because nothing errored.
+  let verdict, tone;
+  if (health === 'critical') {
+    verdict = `${problems.filter((p) => p.level === 'critical').length} bot(s) not running — today's strategy may not have executed.`;
+    tone = 'critical';
+  } else if (fills.length > 0 && !isFallback) {
+    verdict = `${fills.length} fill${fills.length === 1 ? '' : 's'} today across ${new Set(fills.map((f) => f.bot)).size} bot(s).`;
+    tone = todayPnl >= 0 ? 'good' : 'loss';
+  } else if (!session.isTradingDay) {
+    verdict = `No trades — ${session.state === 'weekend' ? 'it is the weekend' : 'markets are closed for a holiday'}. Next open ${session.nextOpen}.`;
+    tone = 'idle';
+  } else if (session.state === 'premarket') {
+    verdict = 'No trades yet — the session has not opened.';
+    tone = 'idle';
+  } else if (problems.length) {
+    verdict = 'No trades today, and one or more bots need attention — see below.';
+    tone = 'warning';
+  } else if (session.state === 'open') {
+    verdict = 'No trades yet today — bots are running and no setup has qualified.';
+    tone = 'idle';
+  } else {
+    verdict = `No trades today — the session closed without a qualifying setup. Next open ${session.nextOpen}.`;
+    tone = 'idle';
+  }
+
+  return {
+    session,
+    equity,
+    lastEquity,
+    todayPnl,
+    todayPnlPct: lastEquity ? (todayPnl / lastEquity) * 100 : 0,
+    unrealized,
+    openPositions,
+    accountsReporting,
+    accountsTotal: strategies.length,
+    movesToday: isFallback ? 0 : fills.length,
+    verdict,
+    tone,
+    health,
+    problems,
+    timeline: {
+      date: timelineDate,
+      isFallback,
+      sessionRealized,
+      fills: fills.length,
+      events: timeline.slice(-60),
     },
   };
 }
@@ -384,7 +703,7 @@ function getHeldUnderlyings() {
   if (csState && csState.date === todayET() && Array.isArray(csState.openTrades)) {
     for (const t of csState.openTrades) if (t.underlying) underlyings.add(t.underlying);
   }
-  const swState = readJson(path.join(SW_LOGS, 'daily-state.json'));
+  const swState = readJson(path.join(OM_LOGS, 'daily-state.json'));
   if (swState && swState.date === todayET() && Array.isArray(swState.openTrades)) {
     for (const t of swState.openTrades) if (t.symbol) underlyings.add(t.symbol);
   }
@@ -473,7 +792,7 @@ async function buildStatus() {
   const stateFile = readJson(path.join(LOGS, 'daily-state.json'));
   const dailyState = stateFile && stateFile.date === todayET() ? stateFile : null;
   const guardrails = readJson(path.join(LOGS, 'account-guardrails.json'));
-  const missedEntryWindow = checkMissedEntryWindow();
+  const missedEntryWindow = checkMissedEntryWindow(path.join(LOGS, 'trade-log.jsonl'), cfg.ORB_ENTRY_CUTOFF, 'ORB-15');
 
   const unrealized = positions.reduce((a, p) => a + parseFloat(p.unrealized_pl || 0), 0);
 
@@ -494,6 +813,7 @@ async function buildStatus() {
     },
     account: account ? {
       equity: parseFloat(account.equity),
+      lastEquity: parseFloat(account.last_equity), // prior trading day's close - the "today" baseline
       cash: parseFloat(account.cash),
       status: account.status,
     } : null,
@@ -534,6 +854,14 @@ const server = http.createServer(async (req, res) => {
   if (req.url === '/api/status') {
     try {
       const status = await buildStatus();
+      // Spread-level positions, plus intraday underlying bars for whatever ORB-15 alone is
+      // holding. Scoped to this bot deliberately - getHeldUnderlyings() spans all four, and
+      // charting another bot's holdings on the ORB console would be actively misleading.
+      const orbOpenTrades = (status.dailyState && status.dailyState.openTrades) || [];
+      status.positionGroups = buildPositionGroups(closeGroupFor, 'orb15', status.positions, orbOpenTrades);
+      const underlyings = [...new Set(status.positionGroups.map((g) => g.underlying))];
+      status.priceCharts = await getPriceCharts(underlyings);
+      status.session = marketSession();
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(status));
     } catch (e) {
@@ -545,6 +873,25 @@ const server = http.createServer(async (req, res) => {
 
   if (req.url === '/api/close' && req.method === 'POST') {
     try {
+      // Basic auth alone does not protect a state-changing POST: a browser that has cached
+      // the credentials will attach them to a cross-site form submission too, so any page
+      // the user visits could close their positions. This dashboard is tunnelled publicly
+      // over ngrok, which makes that a real path rather than a theoretical one. Same-origin
+      // is asserted from Origin, falling back to Referer for older clients; a request with
+      // neither is rejected rather than trusted.
+      const origin = req.headers.origin || null;
+      const referer = req.headers.referer || null;
+      const host = req.headers.host || '';
+      const sameOrigin = (value) => {
+        if (!value) return false;
+        try { return new URL(value).host === host; } catch { return false; }
+      };
+      if (!sameOrigin(origin) && !sameOrigin(referer)) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'cross-origin close requests are refused' }));
+        return;
+      }
+
       const body = JSON.parse((await readBody(req)) || '{}');
       const symbol = typeof body.symbol === 'string' ? body.symbol : null;
       // Defaults to ORB-15 so the older /orb15 page, which predates multi-bot closing and
@@ -610,21 +957,38 @@ const server = http.createServer(async (req, res) => {
       const orbStatus = await buildStatus();
       const overnightStatus = await buildOvernightStatus();
       const creditSpreadStatus = await buildCreditSpreadStatus();
-      const swingSignalsStatus = await buildSwingSignalsStatus();
+      const overnightMomentumStatus = await buildOvernightMomentumStatus();
       const heldUnderlyings = getHeldUnderlyings();
       const priceCharts = await getPriceCharts(heldUnderlyings);
       const dataQualityChecks = await getDataQualityChecks(heldUnderlyings, priceCharts);
+      // `key` is what the dashboard's Close buttons post back to /api/close to name the
+      // account; `closesWith` tells each row which sibling legs go with it.
+      const strategies = [
+        { key: 'orb15', name: 'ORB-15', ...orbStatus, positions: annotateCloseGroups('orb15', orbStatus.positions) },
+        { key: 'overnight', ...overnightStatus, positions: annotateCloseGroups('overnight', overnightStatus.positions) },
+        { key: 'credit-spread', ...creditSpreadStatus, positions: annotateCloseGroups('credit-spread', creditSpreadStatus.positions) },
+        { key: 'overnight-momentum', ...overnightMomentumStatus, positions: annotateCloseGroups('overnight-momentum', overnightMomentumStatus.positions) },
+      ];
+      const overview = buildOverview(strategies);
+      // Per-bot "today" line, derived from the same timeline the overview uses so a card can
+      // never disagree with the header above it.
+      for (const s of strategies) {
+        const mine = overview.timeline.events.filter((e) => e.bot === s.name);
+        const myFills = mine.filter((e) => e.event === 'ENTRY' || e.event === 'EXIT');
+        s.today = {
+          date: overview.timeline.date,
+          isFallback: overview.timeline.isFallback,
+          fills: myFills.length,
+          realized: mine.filter((e) => e.event === 'EXIT' && typeof e.pnl === 'number').reduce((a, e) => a + e.pnl, 0),
+          pnl: s.account && Number.isFinite(s.account.lastEquity) ? s.account.equity - s.account.lastEquity : null,
+          lastActivityTs: mine.length ? mine[mine.length - 1].ts : null,
+        };
+      }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         generatedAt: new Date().toISOString(),
-        // `key` is what the dashboard's Close buttons post back to /api/close to name the
-        // account; `closesWith` tells each row which sibling legs go with it.
-        strategies: [
-          { key: 'orb15', name: 'ORB-15', ...orbStatus, positions: annotateCloseGroups('orb15', orbStatus.positions) },
-          { key: 'overnight', ...overnightStatus, positions: annotateCloseGroups('overnight', overnightStatus.positions) },
-          { key: 'credit-spread', ...creditSpreadStatus, positions: annotateCloseGroups('credit-spread', creditSpreadStatus.positions) },
-          { key: 'swing', ...swingSignalsStatus, positions: annotateCloseGroups('swing', swingSignalsStatus.positions) },
-        ],
+        overview,
+        strategies,
         priceCharts,
         dataQualityChecks,
       }));
@@ -638,15 +1002,18 @@ const server = http.createServer(async (req, res) => {
   // Root is now the multi-bot overview (all 3 strategies) - the detailed ORB-15-only view
   // (equity chart, watchdog, scheduled tasks, nightly review) moved to /orb15. /multi is
   // kept as an alias so the old bookmark/link still works.
-  if (req.url === '/' || req.url === '/index.html' || req.url === '/multi' || req.url === '/multi.html') {
+  // 2026-08-19: `/` is the ORB-15 operator console. The four-bot portfolio view moved to
+  // /multi (and keeps its old /orb15 alias pointing at this page, so existing bookmarks for
+  // either address still land somewhere sensible).
+  if (req.url === '/' || req.url === '/index.html' || req.url === '/orb15' || req.url === '/orb15.html') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(fs.readFileSync(path.join(__dirname, 'multi.html'), 'utf8'));
+    res.end(fs.readFileSync(path.join(__dirname, 'status.html'), 'utf8'));
     return;
   }
 
-  if (req.url === '/orb15' || req.url === '/orb15.html') {
+  if (req.url === '/multi' || req.url === '/multi.html') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(fs.readFileSync(path.join(__dirname, 'status.html'), 'utf8'));
+    res.end(fs.readFileSync(path.join(__dirname, 'multi.html'), 'utf8'));
     return;
   }
 
