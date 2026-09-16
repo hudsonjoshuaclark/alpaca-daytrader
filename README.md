@@ -97,6 +97,8 @@ strategies/<name>/     one self-contained bot each, own config and credentials
 scripts/               backtests, parameter sweeps, Monte Carlo, smoke tests,
                        emergency flatten, report builder
 status-server.js       small local dashboard over all accounts
+phone.html             the same status on a phone, installable to an iPhone
+                       home screen (see PHONE-APP.md)
 reports/               generated daily HTML reports
 ```
 
@@ -114,6 +116,11 @@ Credentials come from environment variables and are never committed. Each strate
 its own pair, for example `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY` for ORB-15,
 `APCA_SWING_API_KEY_ID` and `APCA_SWING_SECRET_KEY` for swing signals, and so on. Market
 news uses `FINNHUB_API_KEY`. Set `LIVE_MODE` only if you intend real orders.
+
+The dashboard runs at `http://localhost:4321`: `/` is the ORB-15 console, `/multi` the
+four-bot portfolio view, and `/phone` a layout for an iPhone that can be added to the home
+screen and used to watch the bots, or close a position, from away from the desk.
+[PHONE-APP.md](PHONE-APP.md) covers installing it.
 
 These are paper accounts and this is a personal research project. Nothing here is
 financial advice.

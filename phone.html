@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- viewport-fit=cover + the safe-area insets below are what let this sit correctly under
+     the notch/Dynamic Island once it is installed to the home screen. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Bots">
+<meta name="theme-color" content="#101110">
+<meta name="format-detection" content="telephone=no">
+<link rel="icon" type="image/png" href="/assets/phone-icon-180.png">
+<link rel="apple-touch-icon" href="/assets/phone-icon-180.png">
+<!-- use-credentials matters: the dashboard is behind basic auth, and a manifest fetched
+     anonymously 401s, which silently costs the installed app its name and icon. -->
+<link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
+<title>Trading Bots</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --page: #f9f9f7; --surface: #fcfcfb; --raised: #f2f2ee;
+    --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --border: rgba(11,11,11,0.10);
+    --up: #006300; --down: #d03b3b; --good: #0ca30c; --warning: #fab219; --critical: #d03b3b;
+    --accent: #2a78d6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0d0d0d; --surface: #1a1a19; --raised: #232322;
+      --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+      --grid: #2c2c2a; --border: rgba(255,255,255,0.10);
+      --up: #0ca30c; --accent: #3987e5;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; -webkit-tap-highlight-color: transparent; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    background: var(--page); color: var(--ink);
+    font: 15px/1.45 -apple-system, system-ui, "Segoe UI", sans-serif;
+    /* contain stops the rubber-band from fighting the custom pull-to-refresh below. */
+    overscroll-behavior-y: contain;
+    padding: 0 env(safe-area-inset-right) calc(env(safe-area-inset-bottom) + 28px) env(safe-area-inset-left);
+  }
+  button { font: inherit; touch-action: manipulation; -webkit-user-select: none; user-select: none; }
+
+  /* --- header ------------------------------------------------------------------------ */
+  header {
+    position: sticky; top: 0; z-index: 20;
+    padding: calc(env(safe-area-inset-top) + 10px) 16px 10px;
+    background: color-mix(in srgb, var(--page) 88%, transparent);
+    -webkit-backdrop-filter: saturate(180%) blur(14px); backdrop-filter: saturate(180%) blur(14px);
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px;
+  }
+  h1 { font-size: 17px; font-weight: 650; letter-spacing: -0.01em; }
+  .updated { margin-left: auto; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .refreshBtn {
+    flex: none; width: 34px; height: 34px; border-radius: 50%;
+    border: 1px solid var(--border); background: var(--surface); color: var(--ink-2);
+    display: grid; place-items: center; padding: 0;
+  }
+  .refreshBtn svg { width: 16px; height: 16px; }
+  .refreshBtn.spin svg { animation: spin 0.9s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Pull-to-refresh indicator. An installed home-screen app has no address bar and no
+     reload button, so without this there is no way to force a fetch by hand. */
+  #pull {
+    position: fixed; left: 0; right: 0; top: env(safe-area-inset-top);
+    display: grid; place-items: center; height: 46px; z-index: 5;
+    color: var(--muted); font-size: 11.5px; pointer-events: none;
+    opacity: 0; transform: translateY(-46px);
+  }
+
+  main { padding: 14px 16px 0; max-width: 620px; margin: 0 auto; }
+  section { margin-bottom: 14px; }
+  .sectionTitle {
+    font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--muted); margin: 0 2px 7px; display: flex; align-items: baseline; gap: 8px;
+  }
+  .sectionTitle .aside { margin-left: auto; font-weight: 500; letter-spacing: 0; text-transform: none; font-size: 11.5px; }
+
+  /* --- hero -------------------------------------------------------------------------- */
+  .hero {
+    background: var(--surface); border: 1px solid var(--border);
+    border-left: 4px solid var(--muted); border-radius: 16px; padding: 16px 18px;
+  }
+  .hero.tone-good { border-left-color: var(--up); }
+  .hero.tone-loss { border-left-color: var(--down); }
+  .hero.tone-warning { border-left-color: var(--warning); }
+  .hero.tone-critical { border-left-color: var(--critical); }
+  .hero.tone-idle { border-left-color: var(--muted); }
+  .heroLabel { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 3px; }
+  .heroPnl { font-size: 38px; font-weight: 680; line-height: 1.05; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+  .heroSub { font-size: 12.5px; color: var(--muted); margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .heroVerdict { font-size: 14px; color: var(--ink-2); margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--grid); }
+  .pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 11px; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--ink-2);
+    border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; white-space: nowrap;
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+
+  /* --- problems ---------------------------------------------------------------------- */
+  .problem {
+    display: flex; gap: 9px; align-items: flex-start; background: var(--surface);
+    border: 1px solid var(--border); border-radius: 12px; padding: 11px 13px; margin-bottom: 7px;
+    font-size: 13px; color: var(--ink-2);
+  }
+  .problem.critical { border-color: color-mix(in srgb, var(--critical) 45%, var(--border)); }
+  .badge {
+    flex: none; font-size: 9.5px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.05em; padding: 2px 6px; border-radius: 4px; margin-top: 1px;
+  }
+  .badge.critical { background: var(--critical); color: #fff; }
+  .badge.warning { background: var(--warning); color: #1a1a19; }
+  .problem b { color: var(--ink); font-weight: 600; }
+
+  /* --- generic list card ------------------------------------------------------------- */
+  .list { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; overflow: hidden; }
+  .row { display: flex; align-items: center; gap: 11px; padding: 12px 14px; border-bottom: 1px solid var(--grid); }
+  .row:last-child { border-bottom: none; }
+  .rowMain { min-width: 0; flex: 1; }
+  .rowTitle { font-size: 14.5px; font-weight: 600; display: flex; align-items: center; gap: 7px; }
+  .rowSub { font-size: 11.5px; color: var(--muted); margin-top: 2px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .rowNum { text-align: right; font-variant-numeric: tabular-nums; flex: none; }
+  .rowNum .big { font-size: 15px; font-weight: 650; }
+  .rowNum .small { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .up { color: var(--up); } .down { color: var(--down); }
+  .empty { padding: 15px 14px; color: var(--muted); font-size: 13px; }
+
+  /* 44px min height is Apple's tap-target floor - below that this is genuinely hard to hit
+     accurately, and the thing it does is irreversible. */
+  .closeBtn {
+    flex: none; min-height: 44px; min-width: 62px; padding: 0 14px; border-radius: 10px;
+    border: 1px solid color-mix(in srgb, var(--critical) 55%, transparent);
+    color: var(--critical); background: transparent; font-size: 13px; font-weight: 600;
+  }
+  .closeBtn:active { background: var(--critical); color: #fff; }
+  .closeBtn:disabled { opacity: 0.45; }
+  .legNote { font-size: 10.5px; color: var(--muted); font-weight: 400; }
+
+  .botTag {
+    font-size: 10px; font-weight: 600; color: var(--ink-2); background: var(--raised);
+    border-radius: 5px; padding: 2px 6px; white-space: nowrap;
+  }
+
+  /* --- timeline ---------------------------------------------------------------------- */
+  .feed { list-style: none; }
+  .feed li { display: flex; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--grid); font-size: 13px; align-items: baseline; }
+  .feed li:last-child { border-bottom: none; }
+  .feed .t { flex: none; width: 58px; color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+  .feed .body { min-width: 0; flex: 1; }
+  .feed .ev { font-weight: 600; }
+  .feed .ev.err { color: var(--critical); }
+  .feed .detail { display: block; color: var(--muted); font-size: 11.5px; margin-top: 1px; overflow-wrap: anywhere; }
+  .feed .pnl { flex: none; font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 600; }
+
+  footer { text-align: center; font-size: 11.5px; color: var(--muted); padding: 4px 16px 0; }
+  footer a { color: var(--muted); }
+  .skeleton { color: var(--muted); font-size: 13.5px; padding: 26px 2px; text-align: center; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Trading Bots</h1>
+  <span class="updated" id="updated"></span>
+  <button class="refreshBtn" id="refreshBtn" aria-label="Refresh">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/>
+    </svg>
+  </button>
+</header>
+
+<div id="pull">Pull to refresh</div>
+
+<main>
+  <div id="content"><div class="skeleton">Loading…</div></div>
+  <footer><a href="/multi">Full dashboard →</a></footer>
+</main>
+
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+
+const fmtUsd = (v) => (v < 0 ? '-$' : '$') + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+// Never strips the minus sign - it only ever ADDS a leading + for non-negatives, so a
+// losing day can never render as a gain.
+const signed = (v) => (v >= 0 ? '+' : '') + fmtUsd(v);
+const plClass = (v) => (v > 0 ? 'up' : v < 0 ? 'down' : '');
+const hhmm = (ts) => new Date(ts).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' });
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const num = (v) => (typeof v === 'number' && Number.isFinite(v));
+
+const SESSION_DOT = { open: 'var(--good)', premarket: 'var(--accent)', afterhours: 'var(--accent)', weekend: 'var(--muted)', holiday: 'var(--muted)', closed: 'var(--muted)' };
+const SESSION_TEXT = { open: 'Market open', premarket: 'Pre-market', afterhours: 'After hours', weekend: 'Weekend', holiday: 'Holiday', closed: 'Market closed' };
+const FRIENDLY = {
+  ENTRY_ORDER: 'order placed', ENTRY: 'entered', ENTRY_UNFILLED: 'order unfilled',
+  ENTRY_CANCEL_STALE: 'order canceled', EXIT: 'exited', FORCE_FLATTEN: 'flattened',
+  DAY_END: 'day closed', START: 'bot started', ERROR: 'error', SIGNAL_BLOCKED: 'signal blocked',
+  MANUAL_CLOSE: 'closed by hand', RATCHET: 'stop raised', TRADE_GONE: 'position vanished',
+  OPPOSING_POSITION_BLOCKED: 'blocked — would negate open position',
+  NO_SIGNAL: 'no signal', ENTER_DONE: 'entry pass done', EXIT_DONE: 'exit pass done',
+  SKIP: 'skipped (already run today)', SIGNAL_ENTRY: 'order placed',
+};
+
+let lastFetch = 0;
+let closeInFlight = 0;
+
+/* --- rendering ---------------------------------------------------------------------- */
+
+function renderHero(o) {
+  const pnl = o.todayPnl;
+  const session = o.session || {};
+  const pills = [];
+  pills.push('<span class="pill"><span class="dot" style="background:' + (SESSION_DOT[session.state] || 'var(--muted)') + '"></span>' +
+    esc(SESSION_TEXT[session.state] || session.state || 'unknown') + '</span>');
+  if (!session.isTradingDay && session.nextOpen) pills.push('<span class="pill">Next open ' + esc(session.nextOpen) + '</span>');
+  pills.push('<span class="pill">' + o.openPositions + ' open</span>');
+  pills.push('<span class="pill">' + o.accountsReporting + '/' + o.accountsTotal + ' accounts</span>');
+
+  return '<section><div class="hero tone-' + esc(o.tone) + '">' +
+    '<div class="heroLabel">Today across all bots</div>' +
+    '<div class="heroPnl ' + plClass(pnl) + '">' + signed(pnl) + '</div>' +
+    '<div class="heroSub">' + (num(o.todayPnlPct) ? (o.todayPnlPct >= 0 ? '+' : '') + o.todayPnlPct.toFixed(2) + '% · ' : '') +
+      fmtUsd(o.equity) + ' equity · ' + signed(o.unrealized) + ' unrealized</div>' +
+    '<div class="pills">' + pills.join('') + '</div>' +
+    '<div class="heroVerdict">' + esc(o.verdict) + '</div>' +
+    '</div></section>';
+}
+
+function renderProblems(o) {
+  if (!o.problems || !o.problems.length) return '';
+  const ranked = o.problems.slice().sort((a, b) => (a.level === 'critical' ? 0 : 1) - (b.level === 'critical' ? 0 : 1));
+  return '<section>' + ranked.map((p) =>
+    '<div class="problem ' + esc(p.level) + '">' +
+      '<span class="badge ' + esc(p.level) + '">' + esc(p.level) + '</span>' +
+      '<span><b>' + esc(p.bot) + '</b> — ' + esc(p.message) + '</span>' +
+    '</div>').join('') + '</section>';
+}
+
+function renderPositions(strategies) {
+  const rows = [];
+  for (const s of strategies) {
+    for (const p of (s.positions || [])) rows.push({ s, p });
+  }
+  let inner;
+  if (!rows.length) {
+    inner = '<div class="empty">No open positions.</div>';
+  } else {
+    inner = rows.map(({ s, p }) => {
+      const legs = (p.closesWith && p.closesWith.length) ? p.closesWith : [p.symbol];
+      const pl = num(p.unrealizedPl) ? p.unrealizedPl : 0;
+      const pct = num(p.unrealizedPlpc) ? (p.unrealizedPlpc * 100) : null;
+      return '<div class="row">' +
+        '<div class="rowMain">' +
+          '<div class="rowTitle"><span class="botTag">' + esc(s.name) + '</span></div>' +
+          '<div class="rowSub">' + esc(p.symbol) + ' · ' + esc(p.qty) + ' @ ' + esc(p.avgEntryPrice) +
+            (p.currentPrice ? ' → ' + esc(p.currentPrice) : '') +
+            (legs.length > 1 ? '<span class="legNote"> · closes ' + legs.length + ' legs</span>' : '') + '</div>' +
+        '</div>' +
+        '<div class="rowNum"><div class="big ' + plClass(pl) + '">' + signed(pl) + '</div>' +
+          (pct === null ? '' : '<div class="small">' + (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%</div>') + '</div>' +
+        '<button class="closeBtn" data-strategy="' + esc(s.key) + '" data-symbol="' + esc(p.symbol) +
+          '" data-legs="' + esc(legs.join(',')) + '">Close</button>' +
+      '</div>';
+    }).join('');
+  }
+  return '<section><div class="sectionTitle">Open positions</div><div class="list">' + inner + '</div></section>';
+}
+
+function renderBots(strategies) {
+  const rows = strategies.map((s) => {
+    // Health and market activity are deliberately separate signals: a bot that simply had
+    // no setup today must never look like a bot that is down.
+    let dot = 'var(--good)', state = 'running';
+    if (typeof s.alive === 'boolean' && !s.alive) {
+      dot = 'var(--critical)';
+      state = 'DOWN — last heartbeat ' + (s.heartbeatAgeSec == null ? 'never' : s.heartbeatAgeSec + 's ago');
+    } else if (s.missedEntryWindow && s.missedEntryWindow.missed) {
+      dot = 'var(--warning)'; state = s.missedEntryWindow.reason;
+    } else if (s.guardrails && s.guardrails.pausedForReview) {
+      dot = 'var(--warning)'; state = 'paused for review';
+    } else if (!s.account) {
+      dot = 'var(--warning)'; state = 'broker account unreachable';
+    } else if (typeof s.alive !== 'boolean') {
+      dot = 'var(--muted)'; state = 'scheduled';
+    }
+
+    const t = s.today || {};
+    const pnl = num(t.pnl) ? t.pnl : null;
+    const bits = [state];
+    if (s.account) bits.push(fmtUsd(s.account.equity));
+    bits.push((t.fills || 0) + ' fill' + ((t.fills || 0) === 1 ? '' : 's') + (t.isFallback ? ' (' + esc(t.date) + ')' : ' today'));
+
+    return '<div class="row">' +
+      '<div class="rowMain">' +
+        '<div class="rowTitle"><span class="dot" style="background:' + dot + '"></span>' + esc(s.name) + '</div>' +
+        '<div class="rowSub">' + bits.map(esc).join(' · ') + '</div>' +
+      '</div>' +
+      '<div class="rowNum">' +
+        (pnl === null ? '<div class="big" style="color:var(--muted)">—</div>'
+                      : '<div class="big ' + plClass(pnl) + '">' + signed(pnl) + '</div>') +
+        ((s.positions || []).length ? '<div class="small">' + s.positions.length + ' open</div>' : '') +
+      '</div>' +
+    '</div>';
+  }).join('');
+  return '<section><div class="sectionTitle">Bots</div><div class="list">' + rows + '</div></section>';
+}
+
+function renderTimeline(o) {
+  const tl = o.timeline || {};
+  const events = (tl.events || []).slice().reverse();
+  const heading = tl.isFallback
+    ? '<span class="aside">last active session · ' + esc(tl.date) + '</span>'
+    : '<span class="aside">' + esc(tl.date) + '</span>';
+  let inner;
+  if (!events.length) {
+    inner = '<div class="empty">No moves recorded.</div>';
+  } else {
+    inner = '<ul class="feed">' + events.map((e) => {
+      const detail = [];
+      if (e.symbol) detail.push(e.symbol);
+      if (num(e.qty)) detail.push('x' + e.qty);
+      if (e.reason) detail.push(Array.isArray(e.reason) ? e.reason.join(', ') : e.reason);
+      return '<li>' +
+        '<span class="t">' + esc(hhmm(e.ts)) + '</span>' +
+        '<span class="body">' +
+          '<span class="ev' + (e.event === 'ERROR' ? ' err' : '') + '">' + esc(FRIENDLY[e.event] || e.event) + '</span>' +
+          '<span class="detail">' + esc(e.bot) + (detail.length ? ' · ' + esc(detail.join(' · ')) : '') + '</span>' +
+        '</span>' +
+        (num(e.pnl) ? '<span class="pnl ' + plClass(e.pnl) + '">' + signed(e.pnl) + '</span>' : '') +
+      '</li>';
+    }).join('') + '</ul>';
+  }
+  return '<section><div class="sectionTitle">Today' + heading + '</div><div class="list">' + inner + '</div></section>';
+}
+
+/* --- manual close -------------------------------------------------------------------- */
+// The strategy key travels with the symbol because each bot trades its own Alpaca account.
+// The server re-resolves the leg group itself and will not act on this page's copy of it.
+async function closePosition(strategy, symbol, legs, btn) {
+  const what = legs.length > 1
+    ? 'Close all ' + legs.length + ' legs of this position (' + legs.join(', ') + ')'
+    : 'Close ' + symbol;
+  if (!confirm(what + ' at market? This cannot be undone.')) return;
+  closeInFlight += 1;
+  btn.disabled = true;
+  btn.textContent = '…';
+  try {
+    const res = await fetch('/api/close', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol, strategy }),
+    });
+    const result = await res.json();
+    if (!res.ok) throw new Error(result.error || ('HTTP ' + res.status));
+    closeInFlight -= 1;
+    await refresh();
+  } catch (e) {
+    closeInFlight -= 1;
+    alert('Close failed: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = 'Close';
+  }
+}
+
+$('content').addEventListener('click', (e) => {
+  const btn = e.target.closest('.closeBtn');
+  if (!btn) return;
+  closePosition(btn.dataset.strategy, btn.dataset.symbol, btn.dataset.legs.split(','), btn);
+});
+
+/* --- fetch loop ---------------------------------------------------------------------- */
+
+async function refresh() {
+  $('refreshBtn').classList.add('spin');
+  try {
+    const res = await fetch('/api/multi-status', { cache: 'no-store' });
+    const s = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((s && s.error) || ('HTTP ' + res.status));
+    if (!s) throw new Error('unreadable response from the status server');
+    if (s.error) throw new Error(s.error);
+    $('content').innerHTML =
+      renderHero(s.overview) +
+      renderProblems(s.overview) +
+      renderPositions(s.strategies) +
+      renderBots(s.strategies) +
+      renderTimeline(s.overview);
+    lastFetch = Date.now();
+    tickUpdated();
+  } catch (e) {
+    // A failed fetch must not leave a stale, confidently-wrong figure on screen - the whole
+    // point of carrying this in a pocket is being able to trust what it says about today.
+    $('content').innerHTML =
+      '<section><div class="hero tone-critical">' +
+        '<div class="heroLabel">Not connected</div>' +
+        '<div class="heroPnl" style="font-size:22px">Can\'t reach the bot server</div>' +
+        '<div class="heroVerdict">' + esc(e.message) + '. ' +
+        (lastFetch
+          ? 'The last good read was ' + Math.round((Date.now() - lastFetch) / 1000) + 's ago — treat anything you saw as stale.'
+          : 'No figures have loaded yet.') +
+        ' Check the machine is awake and the tunnel is up.</div>' +
+      '</div></section>';
+    $('updated').textContent = 'offline';
+  } finally {
+    $('refreshBtn').classList.remove('spin');
+  }
+}
+
+function tickUpdated() {
+  if (!lastFetch) return;
+  const s = Math.round((Date.now() - lastFetch) / 1000);
+  $('updated').textContent = s < 60 ? s + 's ago' : Math.round(s / 60) + 'm ago';
+}
+
+$('refreshBtn').addEventListener('click', () => { if (!closeInFlight) refresh(); });
+
+setInterval(tickUpdated, 1000);
+// Polling stops while the app is backgrounded (iOS throttles it anyway) and while a close
+// is in flight, so the button being tapped is never re-rendered out from under the finger.
+setInterval(() => { if (!document.hidden && !closeInFlight) refresh(); }, 15000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden && !closeInFlight) refresh(); });
+
+/* --- pull to refresh ----------------------------------------------------------------- */
+// Installed to the home screen there is no browser chrome, so this is the only manual
+// refresh gesture besides the header button.
+(function pullToRefresh() {
+  const el = $('pull');
+  const THRESHOLD = 62;
+  let startY = null, dist = 0, armed = false;
+
+  document.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1 || window.scrollY > 0) { startY = null; return; }
+    startY = e.touches[0].clientY;
+    dist = 0; armed = false;
+  }, { passive: true });
+
+  document.addEventListener('touchmove', (e) => {
+    if (startY === null) return;
+    dist = e.touches[0].clientY - startY;
+    if (dist <= 0) { el.style.opacity = '0'; el.style.transform = 'translateY(-46px)'; return; }
+    // Non-passive so this can be prevented: without it iOS rubber-bands the whole document
+    // and the gesture reads as a scroll instead.
+    e.preventDefault();
+    const pulled = Math.min(dist * 0.5, 80);
+    armed = pulled >= THRESHOLD * 0.5;
+    el.style.opacity = String(Math.min(pulled / THRESHOLD, 1));
+    el.style.transform = 'translateY(' + (pulled - 46) + 'px)';
+    el.textContent = armed ? 'Release to refresh' : 'Pull to refresh';
+  }, { passive: false });
+
+  document.addEventListener('touchend', () => {
+    if (startY === null) return;
+    el.style.transition = 'opacity 0.2s, transform 0.2s';
+    el.style.opacity = '0';
+    el.style.transform = 'translateY(-46px)';
+    setTimeout(() => { el.style.transition = ''; }, 220);
+    if (armed && !closeInFlight) refresh();
+    startY = null; armed = false;
+  }, { passive: true });
+})();
+
+refresh();
+</script>
+</body>
+</html>

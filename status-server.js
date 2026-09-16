@@ -844,8 +844,22 @@ async function buildStatus() {
   };
 }
 
+// The home-screen icon and web manifest for the iPhone dashboard (/phone) are served
+// without auth. iOS fetches the touch icon out of the page's own context when a site is
+// added to the home screen, and does not reliably attach stored basic-auth credentials to
+// that request; behind auth it 401s and the installed app silently gets a screenshot for
+// an icon instead. These two files are static branding with no account data in them, so
+// exempting them costs nothing. Everything that reads the accounts stays behind auth.
+// Explicitly enumerated rather than joined from the URL: this server is tunnelled to the
+// public internet, and a file path built out of req.url is how a traversal bug gets in.
+const PHONE_ICONS = {
+  '/assets/phone-icon-180.png': 'phone-icon-180.png',
+  '/assets/phone-icon-512.png': 'phone-icon-512.png',
+};
+const PUBLIC_ASSETS = new Set(['/manifest.webmanifest', ...Object.keys(PHONE_ICONS)]);
+
 const server = http.createServer(async (req, res) => {
-  if (!checkAuth(req)) {
+  if (!PUBLIC_ASSETS.has(req.url) && !checkAuth(req)) {
     res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="ORB Bot Dashboard"', 'Content-Type': 'text/plain' });
     res.end('Authentication required');
     return;
@@ -1014,6 +1028,38 @@ const server = http.createServer(async (req, res) => {
   if (req.url === '/multi' || req.url === '/multi.html') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(fs.readFileSync(path.join(__dirname, 'multi.html'), 'utf8'));
+    return;
+  }
+
+  // The phone dashboard. Same data as /multi, laid out for one thumb and a 390px screen,
+  // and installable to the iPhone home screen (see PHONE-APP.md).
+  if (req.url === '/phone' || req.url === '/phone.html') {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(fs.readFileSync(path.join(__dirname, 'phone.html'), 'utf8'));
+    return;
+  }
+
+  if (req.url === '/manifest.webmanifest') {
+    // start_url is what the home-screen shortcut opens, and display:standalone is what
+    // drops Safari's chrome. Both have to come from the manifest - the old apple-mobile-
+    // web-app-capable meta tag alone no longer does it on current iOS.
+    res.writeHead(200, { 'Content-Type': 'application/manifest+json; charset=utf-8' });
+    res.end(JSON.stringify({
+      name: 'Trading Bots', short_name: 'Bots',
+      description: 'Live status of the Alpaca day-trading bots.',
+      start_url: '/phone', scope: '/', display: 'standalone',
+      background_color: '#101110', theme_color: '#101110', orientation: 'portrait',
+      icons: [
+        { src: '/assets/phone-icon-180.png', sizes: '180x180', type: 'image/png' },
+        { src: '/assets/phone-icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+      ],
+    }));
+    return;
+  }
+
+  if (PHONE_ICONS[req.url]) {
+    res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' });
+    res.end(fs.readFileSync(path.join(__dirname, 'assets', PHONE_ICONS[req.url])));
     return;
   }
 
