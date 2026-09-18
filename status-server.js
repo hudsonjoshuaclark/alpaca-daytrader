@@ -856,7 +856,9 @@ const PHONE_ICONS = {
   '/assets/phone-icon-180.png': 'phone-icon-180.png',
   '/assets/phone-icon-512.png': 'phone-icon-512.png',
 };
-const PUBLIC_ASSETS = new Set(['/manifest.webmanifest', ...Object.keys(PHONE_ICONS)]);
+// /sw.js joins them: a service worker script fetched without credentials 401s, which
+// fails registration outright. It is caching logic with no account data in it.
+const PUBLIC_ASSETS = new Set(['/manifest.webmanifest', '/sw.js', ...Object.keys(PHONE_ICONS)]);
 
 const server = http.createServer(async (req, res) => {
   if (!PUBLIC_ASSETS.has(req.url) && !checkAuth(req)) {
@@ -1034,8 +1036,19 @@ const server = http.createServer(async (req, res) => {
   // The phone dashboard. Same data as /multi, laid out for one thumb and a 390px screen,
   // and installable to the iPhone home screen (see PHONE-APP.md).
   if (req.url === '/phone' || req.url === '/phone.html') {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    // The marker the service worker uses to tell this page apart from an ngrok offline
+    // page, a captive portal or a proxy error - all of which are valid HTTP responses
+    // carrying someone else's HTML, and none of which should overwrite the cached shell.
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'X-Bot-Dashboard': '1' });
     res.end(fs.readFileSync(path.join(__dirname, 'phone.html'), 'utf8'));
+    return;
+  }
+
+  if (req.url === '/sw.js') {
+    // no-cache so an updated worker is actually noticed; the worker itself is what decides
+    // how long anything else lives.
+    res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-cache' });
+    res.end(fs.readFileSync(path.join(__dirname, 'sw.js'), 'utf8'));
     return;
   }
 

@@ -161,6 +161,12 @@
   footer { text-align: center; font-size: 11.5px; color: var(--muted); padding: 4px 16px 0; }
   footer a { color: var(--muted); }
   .skeleton { color: var(--muted); font-size: 13.5px; padding: 26px 2px; text-align: center; }
+  .retryBtn {
+    margin-top: 14px; min-height: 44px; padding: 0 20px; border-radius: 11px;
+    border: 1px solid var(--border); background: var(--raised); color: var(--ink);
+    font-size: 14px; font-weight: 600;
+  }
+  .retryBtn:active { opacity: 0.6; }
 </style>
 </head>
 <body>
@@ -404,7 +410,10 @@ async function refresh() {
           ? 'The last good read was ' + Math.round((Date.now() - lastFetch) / 1000) + 's ago — treat anything you saw as stale.'
           : 'No figures have loaded yet.') +
         ' Check the machine is awake and the tunnel is up.</div>' +
+        '<button class="retryBtn" id="retryBtn">Try again</button>' +
       '</div></section>';
+    const retry = $('retryBtn');
+    if (retry) retry.addEventListener('click', () => { if (!closeInFlight) refresh(); });
     $('updated').textContent = 'offline';
   } finally {
     $('refreshBtn').classList.remove('spin');
@@ -463,6 +472,15 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden && !c
     startY = null; armed = false;
   }, { passive: true });
 })();
+
+// Registered last, and failure is swallowed: the dashboard works without it, and a
+// worker that cannot install must never stop the page from rendering. Service workers
+// need a secure context, so this no-ops on plain http:// over the LAN.
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  });
+}
 
 refresh();
 </script>
