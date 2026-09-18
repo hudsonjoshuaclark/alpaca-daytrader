@@ -95,7 +95,8 @@ lib/                   shared: Alpaca client, market data, contracts, orders,
                        risk manager, indicators, news scoring, screener
 strategies/<name>/     one self-contained bot each, own config and credentials
 scripts/               backtests, parameter sweeps, Monte Carlo, smoke tests,
-                       emergency flatten, report builder, dashboard/tunnel watchdog
+                       emergency flatten, report builder, dashboard/tunnel watchdog,
+                       scheduled-task installers
 status-server.js       small local dashboard over all accounts
 phone.html             the same status on a phone, installable to an iPhone
                        home screen (see PHONE-APP.md)

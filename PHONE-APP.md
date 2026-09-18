@@ -112,16 +112,39 @@ appears in the dashboard's scheduled-task panel with the bots' own tasks.
 
 None of that helps while the machine is asleep. The app will show you the last known state
 (above), but the figures stop moving the moment the machine does. For genuinely live numbers
-in the evening the machine has to be awake:
+outside market hours the machine has to stay awake:
 
 ```powershell
-.\scripts\keep-awake.ps1 -Until 23:30    # or -Forever
+.\scripts\install-keepawake-task.ps1 -Forever
+Start-ScheduledTask -TaskName 'Alpaca Keep Awake'
 ```
 
-The default is still 16:45. Never sleeping costs power and wear on a laptop, so it is a
-choice rather than something changed on your behalf. Worth knowing: while the machine is
-asleep the bots are not trading either, so "offline" is an honest answer rather than a
-missing one — the only positions live at that hour are overnight holds sitting at the broker.
+`-Until 23:30` is the middle option: reachable through the evening, asleep overnight.
+`keep-awake.ps1` still defaults to 16:45 when run by hand, so nothing changes for anything
+that already calls it.
+
+Three settings in that installer are the difference between this working and silently not
+working, and none is a Task Scheduler default: an unlimited execution time limit (tasks are
+killed after three days otherwise, ending an indefinite hold mid-week), permission to start
+and keep running on battery (the default refuses both, precisely when a laptop is about to
+sleep), and a restart count, so a hold that dies does not quietly leave the machine free to
+sleep again.
+
+**Closing the lid still sleeps the machine.** `SetThreadExecutionState` holds off the idle
+timer; the lid switch is a separate power action it cannot override, so a shut lid takes the
+tunnel down whatever the task is doing. To keep it awake on mains with the lid closed, from
+an elevated prompt:
+
+```powershell
+powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 0
+powercfg /setactive SCHEME_CURRENT
+```
+
+`LIDACTION 1` puts it back to sleeping on close.
+
+Worth keeping in mind either way: while the machine is asleep the bots are not trading, so
+"offline" is an honest answer rather than a missing one. The only positions live at that
+hour are overnight holds sitting at the broker, which is what the last known state shows you.
 
 ## Behaviour worth knowing
 
