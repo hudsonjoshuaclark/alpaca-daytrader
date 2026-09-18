@@ -167,6 +167,20 @@
     font-size: 14px; font-weight: 600;
   }
   .retryBtn:active { opacity: 0.6; }
+
+  /* The whole point of the stale view is that it cannot be mistaken for live data, so the
+     figures are drained of colour rather than merely captioned. A stale +$67 must not glow
+     the same confident green a live one does. */
+  .stale { filter: grayscale(0.6) opacity(0.62); pointer-events: none; }
+  .staleBanner {
+    background: var(--surface); border: 1px solid var(--border);
+    border-left: 4px solid var(--warning); border-radius: 16px; padding: 16px 18px; margin-bottom: 14px;
+  }
+  .staleBanner .heroLabel { color: var(--warning); }
+  .staleBanner h2 { font-size: 19px; font-weight: 650; letter-spacing: -0.01em; }
+  .staleBanner p { font-size: 13.5px; color: var(--ink-2); margin-top: 8px; }
+  .staleBanner .age { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--ink); }
+  .staleWarn { color: var(--critical); font-weight: 600; }
 </style>
 </head>
 <body>
@@ -216,9 +230,78 @@ const FRIENDLY = {
 let lastFetch = 0;
 let closeInFlight = 0;
 
+// --- last known state -------------------------------------------------------------------
+// The laptop sleeps every evening, and two strategies hold positions overnight. "Can't
+// reach the bot server" is true but useless at that hour: what you actually want to know is
+// what was open when it last spoke.
+//
+// This deliberately relaxes the rule that a failed fetch clears the screen. The rule worth
+// keeping is narrower - never show a stale figure that LOOKS live - so the snapshot is
+// rendered greyed out, behind a banner naming its age, with the close buttons dead. What is
+// not allowed is a number that passes for current.
+const SNAP_KEY = 'bots.lastKnown.v1';
+const todayET = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+
+function fmtAge(ms) {
+  const m = Math.round(ms / 60000);
+  if (m < 1) return 'moments ago';
+  if (m < 60) return m + ' min ago';
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + 'h ' + (m % 60) + 'm ago';
+  return Math.floor(h / 24) + 'd ' + (h % 24) + 'h ago';
+}
+
+// Stores only the fields the phone actually renders. Keeps well clear of the storage quota,
+// and means a log line or an API key that turns up in some future payload is not quietly
+// persisted to the handset as a side effect.
+function trimSnapshot(s) {
+  const o = s.overview || {};
+  return {
+    at: Date.now(),
+    overview: {
+      session: o.session, tone: o.tone, verdict: o.verdict,
+      equity: o.equity, todayPnl: o.todayPnl, todayPnlPct: o.todayPnlPct, unrealized: o.unrealized,
+      openPositions: o.openPositions, accountsReporting: o.accountsReporting, accountsTotal: o.accountsTotal,
+      problems: (o.problems || []).map((p) => ({ level: p.level, bot: p.bot, message: p.message })),
+      timeline: {
+        date: (o.timeline || {}).date, isFallback: (o.timeline || {}).isFallback,
+        events: ((o.timeline || {}).events || []).slice(-30).map((e) => ({
+          bot: e.bot, ts: e.ts, event: e.event, symbol: e.symbol, qty: e.qty, pnl: e.pnl, reason: e.reason,
+        })),
+      },
+    },
+    strategies: (s.strategies || []).map((st) => ({
+      key: st.key, name: st.name, alive: st.alive, heartbeatAgeSec: st.heartbeatAgeSec,
+      account: st.account ? { equity: st.account.equity } : null,
+      missedEntryWindow: st.missedEntryWindow,
+      guardrails: st.guardrails ? { pausedForReview: st.guardrails.pausedForReview } : null,
+      positions: (st.positions || []).map((p) => ({
+        symbol: p.symbol, qty: p.qty, avgEntryPrice: p.avgEntryPrice, currentPrice: p.currentPrice,
+        unrealizedPl: p.unrealizedPl, unrealizedPlpc: p.unrealizedPlpc, closesWith: p.closesWith,
+      })),
+      today: st.today,
+    })),
+  };
+}
+
+// Storage throws in private browsing and when the quota is gone, and neither is a reason to
+// take the dashboard down with it.
+function saveSnapshot(s) {
+  try { localStorage.setItem(SNAP_KEY, JSON.stringify(trimSnapshot(s))); } catch (e) { /* not worth failing over */ }
+}
+
+function loadSnapshot() {
+  try {
+    const raw = localStorage.getItem(SNAP_KEY);
+    if (!raw) return null;
+    const snap = JSON.parse(raw);
+    return (snap && snap.at && snap.overview) ? snap : null;
+  } catch (e) { return null; }
+}
+
 /* --- rendering ---------------------------------------------------------------------- */
 
-function renderHero(o) {
+function renderHero(o, isStale) {
   const pnl = o.todayPnl;
   const session = o.session || {};
   const pills = [];
@@ -228,8 +311,10 @@ function renderHero(o) {
   pills.push('<span class="pill">' + o.openPositions + ' open</span>');
   pills.push('<span class="pill">' + o.accountsReporting + '/' + o.accountsTotal + ' accounts</span>');
 
-  return '<section><div class="hero tone-' + esc(o.tone) + '">' +
-    '<div class="heroLabel">Today across all bots</div>' +
+  // Tone is forced neutral when stale: the green/red border encodes "how today is going",
+  // and a snapshot from last night is not a statement about today.
+  return '<section><div class="hero tone-' + (isStale ? 'idle' : esc(o.tone)) + '">' +
+    '<div class="heroLabel">' + (isStale ? 'When the laptop last reported' : 'Today across all bots') + '</div>' +
     '<div class="heroPnl ' + plClass(pnl) + '">' + signed(pnl) + '</div>' +
     '<div class="heroSub">' + (num(o.todayPnlPct) ? (o.todayPnlPct >= 0 ? '+' : '') + o.todayPnlPct.toFixed(2) + '% · ' : '') +
       fmtUsd(o.equity) + ' equity · ' + signed(o.unrealized) + ' unrealized</div>' +
@@ -317,12 +402,15 @@ function renderBots(strategies) {
   return '<section><div class="sectionTitle">Bots</div><div class="list">' + rows + '</div></section>';
 }
 
-function renderTimeline(o) {
+function renderTimeline(o, isStale) {
   const tl = o.timeline || {};
   const events = (tl.events || []).slice().reverse();
   const heading = tl.isFallback
     ? '<span class="aside">last active session · ' + esc(tl.date) + '</span>'
     : '<span class="aside">' + esc(tl.date) + '</span>';
+  // "Today" is a claim about the present, and a remembered timeline is not entitled to make
+  // it - least of all the morning after, when the date beside it is yesterday's.
+  const title = isStale ? 'That session' : 'Today';
   let inner;
   if (!events.length) {
     inner = '<div class="empty">No moves recorded.</div>';
@@ -342,7 +430,7 @@ function renderTimeline(o) {
       '</li>';
     }).join('') + '</ul>';
   }
-  return '<section><div class="sectionTitle">Today' + heading + '</div><div class="list">' + inner + '</div></section>';
+  return '<section><div class="sectionTitle">' + title + heading + '</div><div class="list">' + inner + '</div></section>';
 }
 
 /* --- manual close -------------------------------------------------------------------- */
@@ -382,6 +470,43 @@ $('content').addEventListener('click', (e) => {
 
 /* --- fetch loop ---------------------------------------------------------------------- */
 
+// Shown in place of a bare "not connected" card when there is something remembered. The
+// banner carries the two facts that decide whether the numbers below mean anything: how old
+// they are, and whether they even describe today.
+function renderStale(snap, message) {
+  const o = snap.overview;
+  const age = fmtAge(Date.now() - snap.at);
+  const seenAt = new Date(snap.at).toLocaleString('en-US', {
+    weekday: 'short', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York',
+  });
+  const sessionDate = (o.timeline || {}).date;
+  const staleSession = sessionDate && sessionDate !== todayET();
+
+  const banner =
+    '<div class="staleBanner">' +
+      '<div class="heroLabel">Last known state</div>' +
+      '<h2>The bot machine is offline</h2>' +
+      '<p>Showing what it reported at <span class="age">' + esc(seenAt) + ' ET</span>, ' + esc(age) + '. ' +
+        'Nothing below is live' +
+        (staleSession
+          ? ' — and it is from the <span class="staleWarn">' + esc(sessionDate) + ' session, not today</span>.'
+          : '.') +
+      '</p>' +
+      '<p>' + esc(message) + '. While the machine is down the bots are not trading, but any ' +
+        'position already open is still live at the broker and its value will have moved.</p>' +
+      '<button class="retryBtn" id="retryBtn">Try again</button>' +
+    '</div>';
+
+  return banner +
+    '<div class="stale">' +
+      renderHero(o, true) +
+      renderProblems(o) +
+      renderPositions(snap.strategies) +
+      renderBots(snap.strategies) +
+      renderTimeline(o, true) +
+    '</div>';
+}
+
 async function refresh() {
   $('refreshBtn').classList.add('spin');
   try {
@@ -396,25 +521,36 @@ async function refresh() {
       renderPositions(s.strategies) +
       renderBots(s.strategies) +
       renderTimeline(s.overview);
+    saveSnapshot(s);
     lastFetch = Date.now();
     tickUpdated();
   } catch (e) {
-    // A failed fetch must not leave a stale, confidently-wrong figure on screen - the whole
-    // point of carrying this in a pocket is being able to trust what it says about today.
-    $('content').innerHTML =
-      '<section><div class="hero tone-critical">' +
-        '<div class="heroLabel">Not connected</div>' +
-        '<div class="heroPnl" style="font-size:22px">Can\'t reach the bot server</div>' +
-        '<div class="heroVerdict">' + esc(e.message) + '. ' +
-        (lastFetch
-          ? 'The last good read was ' + Math.round((Date.now() - lastFetch) / 1000) + 's ago — treat anything you saw as stale.'
-          : 'No figures have loaded yet.') +
-        ' Check the machine is awake and the tunnel is up.</div>' +
-        '<button class="retryBtn" id="retryBtn">Try again</button>' +
-      '</div></section>';
+    // A live-looking figure must never survive a failed fetch. A figure that is visibly,
+    // unmistakably old is a different thing, and at 11pm with positions open it is the
+    // answer actually wanted.
+    const snap = loadSnapshot();
+    if (snap) {
+      $('content').innerHTML = renderStale(snap, e.message);
+      // Closing a position needs the server that cannot be reached. The buttons are killed
+      // rather than left to fail on tap, so nobody stands there jabbing at one believing a
+      // position is being closed.
+      for (const btn of document.querySelectorAll('.stale .closeBtn')) {
+        btn.disabled = true;
+        btn.textContent = '—';
+      }
+    } else {
+      $('content').innerHTML =
+        '<section><div class="hero tone-critical">' +
+          '<div class="heroLabel">Not connected</div>' +
+          '<div class="heroPnl" style="font-size:22px">Can\'t reach the bot server</div>' +
+          '<div class="heroVerdict">' + esc(e.message) + '. No figures have loaded yet. ' +
+          'Check the machine is awake and the tunnel is up.</div>' +
+          '<button class="retryBtn" id="retryBtn">Try again</button>' +
+        '</div></section>';
+    }
     const retry = $('retryBtn');
     if (retry) retry.addEventListener('click', () => { if (!closeInFlight) refresh(); });
-    $('updated').textContent = 'offline';
+    $('updated').textContent = snap ? fmtAge(Date.now() - snap.at) : 'offline';
   } finally {
     $('refreshBtn').classList.remove('spin');
   }

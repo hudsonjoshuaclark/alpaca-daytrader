@@ -110,8 +110,9 @@ It logs only when it acts, so `logs\watchdog.log` is a list of things that went 
 than thousands of lines of nothing. The task is named to match the `Alpaca*` filter, so it
 appears in the dashboard's scheduled-task panel with the bots' own tasks.
 
-None of that helps while the machine is asleep. For the app to answer in the evening the
-machine has to be awake:
+None of that helps while the machine is asleep. The app will show you the last known state
+(above), but the figures stop moving the moment the machine does. For genuinely live numbers
+in the evening the machine has to be awake:
 
 ```powershell
 .\scripts\keep-awake.ps1 -Until 23:30    # or -Forever
@@ -128,14 +129,25 @@ missing one — the only positions live at that hour are overnight holds sitting
   in flight so the button under your thumb is not re-rendered mid-tap.
 - Pull down to refresh, or tap the ↻ in the header. Installed to the home screen there is
   no address bar, so these are the only manual refreshes.
-- If the server cannot be reached the page **clears** and says so rather than leaving a
-  stale number on screen, and offers a Try again button. A figure on this page is either
-  current or visibly absent.
-- A service worker (`sw.js`) caches the page shell, so the app opens to that screen instead
-  of ngrok's error page when the tunnel is down. It caches the shell and the icon only —
-  never `/api/` — so it can never show you a stale P&L. The first load after installing has
-  to succeed once for there to be anything cached; iOS may also evict the cache after about
-  a week unused, after which one online load restores it.
+- If the server cannot be reached the page shows the **last known state**: what the machine
+  reported the last time it answered, greyed out, behind a banner giving its age and, when
+  it is from an earlier session, saying so in red. The Close buttons are dead, because
+  closing a position needs the server that cannot be reached.
+
+  This is a deliberate relaxation of an earlier rule that a failed fetch cleared the screen
+  entirely. The rule worth keeping turned out to be narrower — never show a stale figure
+  that *looks* live — and a blank "not connected" card is useless at 11pm when the laptop
+  has slept and two strategies are holding overnight. What is remembered is only what the
+  phone already displayed; it is stored on the handset, never fetched from anywhere.
+
+  With nothing remembered yet, it still shows the plain not-connected card rather than
+  inventing one.
+- A service worker (`sw.js`) caches the page shell, so the app opens to its own screen
+  instead of ngrok's error page when the tunnel is down. It caches the shell and the icon
+  only — never `/api/` — so the worker itself can never replay an old response as a live
+  one. The first load after installing has to succeed once for there to be anything cached;
+  iOS may also evict the cache after about a week unused, after which one online load
+  restores it.
 - The icon, `sw.js` and `manifest.webmanifest` are served without auth, because iOS fetches the
   touch icon outside the page's credentialed context and would otherwise install the app
   with a screenshot for an icon. They are static artwork; everything that reads an account
